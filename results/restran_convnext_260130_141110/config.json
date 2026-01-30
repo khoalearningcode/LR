@@ -1,5 +1,6 @@
 {
   "AUGMENTATION_LEVEL": "full",
+  "AUX_SR": false,
   "BACKBONE_TYPE": "convnext",
   "BATCH_SIZE": 64,
   "CHAR2IDX": {
@@ -90,8 +91,8 @@
   "LEARNING_RATE": 0.0005,
   "MODEL_TYPE": "restran",
   "NUM_CLASSES": 37,
-  "NUM_WORKERS": 10,
-  "OUTPUT_DIR": "results/restran_convnext_260130_092958",
+  "NUM_WORKERS": 8,
+  "OUTPUT_DIR": "results/restran_convnext_260130_141110",
   "RNN_DROPOUT": 0.25,
   "SEED": 42,
   "SPLIT_RATIO": 0.9,
