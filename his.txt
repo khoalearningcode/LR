@@ -3,3 +3,11 @@ python train.py --model restran --backbone convnext --experiment-name restran_co
 /home/godminhkhoa/Document/ICPR2026/results/restran_convnext_260130_092958
 
     - 
+python train.py \
+    --model restran \
+    --backbone convnext \
+    --sr-aux \
+    --batch-size 32 \
+    --epochs 30 \
+    --num-workers 8 \
+    --experiment-name convnext_tiny_sr_v1
