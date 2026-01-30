@@ -162,9 +162,11 @@ class AttentionFusion(nn.Module):
     """
     Attention-based fusion module for combining multi-frame features.
     Computes a weighted sum of features from multiple frames based on their 'quality' scores.
+    Supports frame dropout during training for regularization.
     """
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, frame_dropout: float = 0.0):
         super().__init__()
+        self.frame_dropout = float(frame_dropout)
         # A small CNN to predict attention scores (quality map) from features
         self.score_net = nn.Sequential(
             nn.Conv2d(channels, channels // 8, kernel_size=1),
@@ -188,6 +190,13 @@ class AttentionFusion(nn.Module):
         
         # Calculate attention scores: [Batch, Frames, 1, H, W]
         scores = self.score_net(x).view(batch_size, num_frames, 1, h, w)
+        
+        # NEW: frame dropout (training only)
+        if self.training and self.frame_dropout > 0:
+            drop_mask = (torch.rand(batch_size, num_frames, 1, 1, 1, device=scores.device)
+                         < self.frame_dropout)
+            scores = scores.masked_fill(drop_mask, -1e4)
+        
         weights = F.softmax(scores, dim=1)  # Normalize scores across frames
 
         # Weighted sum fusion

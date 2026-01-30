@@ -25,7 +25,9 @@ class ResTranOCR(nn.Module):
         dropout: float = 0.1,
         use_stn: bool = True,
         backbone_type: str = "convnext",
-        aux_sr: bool = False  # Thêm tham số này
+        aux_sr: bool = False,
+        frame_dropout: float = 0.0,
+        backbone_pretrained: bool = False
     ):
         super().__init__()
         self.use_stn = use_stn
@@ -40,7 +42,7 @@ class ResTranOCR(nn.Module):
             self.backbone = ConvNeXtFeatureExtractor()
             self.backbone_out_channels = 768 # ConvNeXt Tiny output
         else:
-            self.backbone = ResNetFeatureExtractor(pretrained=False)
+            self.backbone = ResNetFeatureExtractor(pretrained=backbone_pretrained)
             self.backbone_out_channels = 512 # ResNet34 output
         
         # Project backbone features to a common dimension (512) for Fusion/Transformer
@@ -48,7 +50,7 @@ class ResTranOCR(nn.Module):
         self.cnn_channels = 512
         
         # 3. Attention Fusion
-        self.fusion = AttentionFusion(channels=self.cnn_channels)
+        self.fusion = AttentionFusion(channels=self.cnn_channels, frame_dropout=frame_dropout)
         
         # 4. Transformer Encoder
         self.pos_encoder = PositionalEncoding(d_model=self.cnn_channels, dropout=dropout)

@@ -11,7 +11,7 @@ class MultiFrameCRNN(nn.Module):
     Standard CRNN architecture adapted for Multi-frame input with optional STN alignment.
     Pipeline: Input (5 frames) -> [Optional STN] -> CNN Backbone -> Attention Fusion -> BiLSTM -> CTC Head
     """
-    def __init__(self, num_classes: int, hidden_size: int = 256, rnn_dropout: float = 0.25, use_stn: bool = True):
+    def __init__(self, num_classes: int, hidden_size: int = 256, rnn_dropout: float = 0.25, use_stn: bool = True, frame_dropout: float = 0.0):
         super().__init__()
         self.cnn_channels = 512
         self.use_stn = use_stn
@@ -24,7 +24,7 @@ class MultiFrameCRNN(nn.Module):
         self.backbone = CNNBackbone(out_channels=self.cnn_channels)
         
         # 3. Fusion
-        self.fusion = AttentionFusion(channels=self.cnn_channels)
+        self.fusion = AttentionFusion(channels=self.cnn_channels, frame_dropout=frame_dropout)
         
         # 4. Sequence Modeling (BiLSTM)
         self.rnn = nn.LSTM(

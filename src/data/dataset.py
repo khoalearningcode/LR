@@ -38,6 +38,7 @@ class MultiFrameDataset(Dataset):
         augmentation_level: str = "full",
         is_test: bool = False,
         full_train: bool = False,
+        train_lr_sim_p: float = 0.0,
     ):
         """
         Args:
@@ -63,13 +64,14 @@ class MultiFrameDataset(Dataset):
         self.augmentation_level = augmentation_level
         self.is_test = is_test
         self.full_train = full_train
+        self.train_lr_sim_p = train_lr_sim_p
         
         if mode == 'train':
             # Training: apply augmentation on the fly
             if augmentation_level == "light":
-                self.transform = get_light_transforms(img_height, img_width)
+                self.transform = get_light_transforms(img_height, img_width, lr_sim_p=self.train_lr_sim_p)
             else:
-                self.transform = get_train_transforms(img_height, img_width)
+                self.transform = get_train_transforms(img_height, img_width, lr_sim_p=self.train_lr_sim_p)
             self.degrade = get_degradation_transforms()
         else:
             # Validation or test: only resize and normalize

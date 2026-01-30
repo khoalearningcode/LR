@@ -305,6 +305,48 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable Super-Resolution Auxiliary Branch",
     )
+    parser.add_argument(
+        "--img-height",
+        type=int,
+        default=None,
+        help="Image height (default: from config)"
+    )
+    parser.add_argument(
+        "--img-width",
+        type=int,
+        default=None,
+        help="Image width (default: from config)"
+    )
+    parser.add_argument(
+        "--train-lr-sim-p",
+        type=float,
+        default=None,
+        help="Probability of mild LR-like degradation on training images (real LR too)."
+    )
+    parser.add_argument(
+        "--frame-dropout",
+        type=float,
+        default=None,
+        help="Drop frames in AttentionFusion during training (0~0.5)."
+    )
+    parser.add_argument(
+        "--backbone-pretrained",
+        action="store_true",
+        help="Use pretrained weights for ResNet backbone (only if --backbone resnet)."
+    )
+    parser.add_argument(
+        "--beam-width",
+        type=int,
+        default=None,
+        help="CTC beam width for decoding (1=greedy)."
+    )
+    parser.add_argument(
+        "--conf-mode",
+        type=str,
+        default=None,
+        choices=["meanmax", "geom", "margin"],
+        help="Confidence mode: meanmax/geom (greedy), margin (beam)."
+    )
     return parser.parse_args()
 
 
@@ -349,6 +391,25 @@ def main():
         config.AUX_SR = True
     else:
         config.AUX_SR = False
+
+    if args.img_height is not None:
+        config.IMG_HEIGHT = args.img_height
+    if args.img_width is not None:
+        config.IMG_WIDTH = args.img_width
+
+    if args.train_lr_sim_p is not None:
+        config.TRAIN_LR_SIM_P = float(args.train_lr_sim_p)
+
+    if args.frame_dropout is not None:
+        config.FRAME_DROPOUT = float(args.frame_dropout)
+
+    config.BACKBONE_PRETRAINED = bool(args.backbone_pretrained)
+
+    if args.beam_width is not None:
+        config.BEAM_WIDTH = int(args.beam_width)
+
+    if args.conf_mode is not None:
+        config.CONF_MODE = str(args.conf_mode)
 
     # Create per-run folder: results/<exp>_<timestamp>[_tag]/
     ts = datetime.now().strftime("%y%m%d_%H%M%S")
@@ -425,6 +486,7 @@ def main():
         'val_split_file': config.VAL_SPLIT_FILE,
         'seed': config.SEED,
         'augmentation_level': config.AUGMENTATION_LEVEL,
+        'train_lr_sim_p': getattr(config, "TRAIN_LR_SIM_P", 0.0),
     }
 
     # Create datasets based on mode
@@ -528,6 +590,8 @@ def main():
             use_stn=config.USE_STN,
             backbone_type=config.BACKBONE_TYPE,
             aux_sr=config.AUX_SR,
+            frame_dropout=getattr(config, "FRAME_DROPOUT", 0.0),
+            backbone_pretrained=getattr(config, "BACKBONE_PRETRAINED", False),
         ).to(config.DEVICE)
     else:
         model = MultiFrameCRNN(
@@ -535,6 +599,7 @@ def main():
             hidden_size=config.HIDDEN_SIZE,
             rnn_dropout=config.RNN_DROPOUT,
             use_stn=config.USE_STN,
+            frame_dropout=getattr(config, "FRAME_DROPOUT", 0.0),
         ).to(config.DEVICE)
 
     # Print model summary

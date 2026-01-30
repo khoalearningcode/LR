@@ -1,12 +1,6 @@
-    - convnext chạy thử restran + convnext
-python train.py --model restran --backbone convnext --experiment-name restran_convnext
-/home/godminhkhoa/Document/ICPR2026/results/restran_convnext_260130_092958
-
-    - convnext và sr-aux
-python train.py \
-    --model restran \
-    --backbone convnext \
-    --sr-aux \
-    --batch-size 8 \
-    --epochs 30 \
-    --experiment-name convnext_tiny_sr_v1
+python train.py -m restran --backbone convnext \
+  --aug-level full \
+  --img-width 160 \
+  --train-lr-sim-p 0.35 \
+  --frame-dropout 0.20 \
+  --run-tag lrSim035_fd02_w160

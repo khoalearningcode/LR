@@ -180,8 +180,10 @@ class Trainer:
                 )
                 val_loss += loss.item()
 
-                # Decode predictions
-                decoded_list = decode_with_confidence(preds, self.idx2char)
+                # Decode predictions with beam search and confidence mode
+                bw = getattr(self.config, "BEAM_WIDTH", 1)
+                cm = getattr(self.config, "CONF_MODE", "meanmax")
+                decoded_list = decode_with_confidence(preds, self.idx2char, beam_width=bw, conf_mode=cm)
 
                 for i, (pred_text, conf) in enumerate(decoded_list):
                     gt_text = labels_text[i]
@@ -273,12 +275,16 @@ class Trainer:
         self.model.eval()
         results: List[Tuple[str, str, float]] = []
         
+        # Get decoding parameters from config
+        bw = getattr(self.config, "BEAM_WIDTH", 1)
+        cm = getattr(self.config, "CONF_MODE", "meanmax")
+        
         with torch.no_grad():
-            for images, _, _, _, track_ids in loader:
+            for images, _, _, _, _, track_ids in loader:
                 images = images.to(self.device)
                 preds = self.model(images)
                 
-                decoded_list = decode_with_confidence(preds, self.idx2char)
+                decoded_list = decode_with_confidence(preds, self.idx2char, beam_width=bw, conf_mode=cm)
                 for i, (pred_text, conf) in enumerate(decoded_list):
                     results.append((track_ids[i], pred_text, conf))
         
@@ -296,11 +302,16 @@ class Trainer:
         # Use existing predict method
         results = []
         self.model.eval()
+        
+        # Get decoding parameters from config
+        bw = getattr(self.config, "BEAM_WIDTH", 1)
+        cm = getattr(self.config, "CONF_MODE", "meanmax")
+        
         with torch.no_grad():
-            for images, _, _, _, track_ids in tqdm(test_loader, desc="Test Inference"):
+            for images, _, _, _, _, track_ids in tqdm(test_loader, desc="Test Inference"):
                 images = images.to(self.device)
                 preds = self.model(images)
-                decoded_list = decode_with_confidence(preds, self.idx2char)
+                decoded_list = decode_with_confidence(preds, self.idx2char, beam_width=bw, conf_mode=cm)
                 
                 for i, (pred_text, conf) in enumerate(decoded_list):
                     results.append((track_ids[i], pred_text, conf))

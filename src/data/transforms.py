@@ -3,10 +3,24 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 
-def get_train_transforms(img_height: int = 32, img_width: int = 128) -> A.Compose:
+def get_train_transforms(img_height: int = 32, img_width: int = 128, lr_sim_p: float = 0.0) -> A.Compose:
     """Training augmentation pipeline with geometric and color transforms."""
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
+
+        # NEW: mild LR simulation for real LR too
+        A.OneOf([
+            A.ImageCompression(quality_range=(30, 80), p=1.0),
+            A.Downscale(scale_range=(0.6, 0.95), p=1.0),
+            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+            A.MotionBlur(blur_limit=(3, 5), p=1.0),
+        ], p=lr_sim_p),
+
+        A.OneOf([
+            A.GaussNoise(p=1.0),
+            A.MultiplicativeNoise(multiplier=(0.9, 1.1), p=1.0),
+        ], p=lr_sim_p * 0.7),
+
         A.Affine(
             scale=(0.95, 1.05),
             translate_percent=(0.05, 0.05),
@@ -35,10 +49,18 @@ def get_train_transforms(img_height: int = 32, img_width: int = 128) -> A.Compos
     ])
 
 
-def get_light_transforms(img_height: int = 32, img_width: int = 128) -> A.Compose:
-    """Light training pipeline: resize + normalize only."""
+def get_light_transforms(img_height: int = 32, img_width: int = 128, lr_sim_p: float = 0.0) -> A.Compose:
+    """Light training pipeline: resize + normalize + mild LR simulation."""
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
+
+        # NEW: mild LR simulation even in light augmentation mode
+        A.OneOf([
+            A.ImageCompression(quality_range=(30, 80), p=1.0),
+            A.Downscale(scale_range=(0.6, 0.95), p=1.0),
+            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+        ], p=lr_sim_p),
+
         A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2(),
     ])
