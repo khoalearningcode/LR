@@ -1,7 +1,7 @@
 {
   "AUGMENTATION_LEVEL": "full",
   "BACKBONE_TYPE": "convnext",
-  "BATCH_SIZE": 16,
+  "BATCH_SIZE": 64,
   "CHAR2IDX": {
     "0": 1,
     "1": 2,
@@ -91,7 +91,7 @@
   "MODEL_TYPE": "restran",
   "NUM_CLASSES": 37,
   "NUM_WORKERS": 10,
-  "OUTPUT_DIR": "results/restran_convnext_260130_001950",
+  "OUTPUT_DIR": "results/restran_convnext_260130_092958",
   "RNN_DROPOUT": 0.25,
   "SEED": 42,
   "SPLIT_RATIO": 0.9,

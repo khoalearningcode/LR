@@ -300,3 +300,36 @@ class PositionalEncoding(nn.Module):
         """
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
+    
+
+class SRDecoder(nn.Module):
+    def __init__(self, in_channels=512):
+        super().__init__()
+        # Input: [Batch, in_channels, 1, W] (Do backbone đã pool chiều cao về 1)
+        # Mục tiêu: Upsample về [Batch, 3, 32, 128]
+        
+        self.net = nn.Sequential(
+            # Bước 1: Mở rộng chiều cao từ 1 lên 4
+            nn.ConvTranspose2d(in_channels, 256, kernel_size=(4, 3), stride=(4, 1), padding=(0, 1)),
+            nn.BatchNorm2d(256),
+            nn.ReLU(True),
+            
+            # Bước 2: Upsample tiếp lên 8 -> 16 -> 32
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+            
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            
+            nn.Conv2d(32, 3, kernel_size=3, stride=1, padding=1),
+            nn.Tanh() 
+        )
+
+    def forward(self, x):
+        return self.net(x)

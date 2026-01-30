@@ -36,7 +36,8 @@ class Config:
     GRAD_CLIP: float = 5.0
     SPLIT_RATIO: float = 0.9
     USE_CUDNN_BENCHMARK: bool = False
-    BACKBONE_TYPE: str = "convnext"  
+    BACKBONE_TYPE: str = "convnext" 
+    AUX_SR: bool = False  # Use auxiliary super-resolution task 
     
     # CRNN model hyperparameters
     HIDDEN_SIZE: int = 256

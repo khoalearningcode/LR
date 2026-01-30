@@ -229,7 +229,7 @@ class MultiFrameDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int, str, str]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, str, str]:
         """Load exactly 5 frames (guaranteed by dataset structure).
         
         For training: applies degradation (if synthetic) then augmentation.
@@ -242,20 +242,29 @@ class MultiFrameDataset(Dataset):
         is_synthetic = item['is_synthetic']
         track_id = item['track_id']
         
-        images_list = []
+        lr_images_list = []
+        hr_images_list = [] # List mới
+        
         for p in img_paths:
-            image = cv2.imread(p, cv2.IMREAD_COLOR)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # Load HR
+            image_hr = cv2.imread(p, cv2.IMREAD_COLOR)
+            image_hr = cv2.cvtColor(image_hr, cv2.COLOR_BGR2RGB)
             
-            # Apply degradation first (if synthetic), before any transform
+            # Xử lý LR
+            image_lr = image_hr.copy()
             if is_synthetic and self.degrade:
-                image = self.degrade(image=image)['image']
+                image_lr = self.degrade(image=image_lr)['image']
+            image_lr = self.transform(image=image_lr)['image']
+            lr_images_list.append(image_lr)
             
-            # Apply transform (augmented for training, clean for validation/test)
-            image = self.transform(image=image)['image']
-            images_list.append(image)
+            # Xử lý HR Target (Dùng val transform để chỉ resize/normalize chuẩn)
+            # Lưu ý: Import get_val_transforms ở đầu file nếu chưa có
+            hr_transform = get_val_transforms(self.img_height, self.img_width)
+            image_hr_tensor = hr_transform(image=image_hr)['image']
+            hr_images_list.append(image_hr_tensor)
 
-        images_tensor = torch.stack(images_list, dim=0)
+        images_tensor = torch.stack(lr_images_list, dim=0)
+        hr_images_tensor = torch.stack(hr_images_list, dim=0) # [5, 3, 32, 128]
         
         # Handle test mode (no labels)
         if self.is_test:
@@ -267,13 +276,16 @@ class MultiFrameDataset(Dataset):
                 target = [0]
             target_len = len(target)
             
-        return images_tensor, torch.tensor(target, dtype=torch.long), target_len, label, track_id
+        return images_tensor, hr_images_tensor, torch.tensor(target, dtype=torch.long), target_len, label, track_id
 
     @staticmethod
     def collate_fn(batch: List[Tuple]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Tuple[str, ...], Tuple[str, ...]]:
         """Custom collate function for DataLoader."""
-        images, targets, target_lengths, labels_text, track_ids = zip(*batch)
+        images, hr_images, targets, target_lengths, labels_text, track_ids = zip(*batch)
+        
         images = torch.stack(images, 0)
+        hr_images = torch.stack(hr_images, 0) # Stack HR
         targets = torch.cat(targets)
         target_lengths = torch.tensor(target_lengths, dtype=torch.long)
-        return images, targets, target_lengths, labels_text, track_ids
+        
+        return images, hr_images, targets, target_lengths, labels_text, track_ids

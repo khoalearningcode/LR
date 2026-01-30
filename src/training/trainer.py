@@ -42,6 +42,7 @@ class Trainer:
         
         # Loss and optimizer
         self.criterion = nn.CTCLoss(blank=0, zero_infinity=True, reduction='mean')
+        self.sr_criterion = nn.MSELoss()
         self.optimizer = optim.AdamW(
             model.parameters(),
             lr=config.LEARNING_RATE,
@@ -75,14 +76,23 @@ class Trainer:
         epoch_loss = 0.0
         pbar = tqdm(self.train_loader, desc=f"Ep {self.current_epoch + 1}/{self.config.EPOCHS}")
         
-        for images, targets, target_lengths, _, _ in pbar:
+        for images, hr_images, targets, target_lengths, _, _ in pbar:
             images = images.to(self.device)
+            hr_images = hr_images.to(self.device)
             targets = targets.to(self.device)
             
             self.optimizer.zero_grad(set_to_none=True)
             
             with autocast('cuda'):
-                preds = self.model(images)
+                # Kiểm tra xem có đang dùng SR không
+                use_sr = getattr(self.config, 'AUX_SR', False)
+                
+                if use_sr:
+                    preds, sr_out, grid = self.model(images, return_sr=True)
+                else:
+                    preds = self.model(images)
+                
+                # 1. CTC Loss
                 preds_permuted = preds.permute(1, 0, 2)
                 input_lengths = torch.full(
                     size=(images.size(0),),
@@ -90,6 +100,20 @@ class Trainer:
                     dtype=torch.long
                 )
                 loss = self.criterion(preds_permuted, targets, input_lengths, target_lengths)
+                
+                # 2. SR Loss (Nếu có)
+                sr_loss = None
+                if use_sr and sr_out is not None:
+                    # Flatten HR images: [B, F, C, H, W] -> [B*F, C, H, W]
+                    b, f, c, h, w = hr_images.size()
+                    hr_target = hr_images.view(b * f, c, h, w)
+                    
+                    # Nếu có Grid STN, biến đổi HR target theo grid đó để khớp với sr_out
+                    if grid is not None:
+                        hr_target = torch.nn.functional.grid_sample(hr_target, grid, align_corners=False)
+                        
+                    sr_loss = self.sr_criterion(sr_out, hr_target)
+                    loss = loss + sr_loss * 1.0  # SR Weight = 1.0
 
             # Scale loss & backward
             self.scaler.scale(loss).backward()
@@ -112,7 +136,10 @@ class Trainer:
                 self.scheduler.step()
             
             epoch_loss += loss.item()
-            pbar.set_postfix({'loss': loss.item(), 'lr': self.scheduler.get_last_lr()[0]})
+            if use_sr and sr_loss is not None:
+                pbar.set_postfix({'loss': loss.item(), 'sr': sr_loss.item(), 'lr': self.scheduler.get_last_lr()[0]})
+            else:
+                pbar.set_postfix({'loss': loss.item(), 'lr': self.scheduler.get_last_lr()[0]})
         
         return epoch_loss / len(self.train_loader)
 
@@ -135,7 +162,7 @@ class Trainer:
         submission_data: List[str] = []
         
         with torch.no_grad():
-            for images, targets, target_lengths, labels_text, track_ids in self.val_loader:
+            for images, hr_images, targets, target_lengths, labels_text, track_ids in self.val_loader:
                 images = images.to(self.device)
                 targets = targets.to(self.device)
                 preds = self.model(images)

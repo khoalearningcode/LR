@@ -300,6 +300,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Backbone architecture for ResTran: 'resnet' or 'convnext'"
     )
+    parser.add_argument(
+        "--sr-aux",
+        action="store_true",
+        help="Enable Super-Resolution Auxiliary Branch",
+    )
     return parser.parse_args()
 
 
@@ -339,6 +344,11 @@ def main():
 
     if args.backbone is not None:
         config.BACKBONE_TYPE = args.backbone
+
+    if args.sr_aux:
+        config.AUX_SR = True
+    else:
+        config.AUX_SR = False
 
     # Create per-run folder: results/<exp>_<timestamp>[_tag]/
     ts = datetime.now().strftime("%y%m%d_%H%M%S")
@@ -397,6 +407,7 @@ def main():
     print(f"   BATCH_SIZE: {config.BATCH_SIZE}")
     print(f"   LEARNING_RATE: {config.LEARNING_RATE}")
     print(f"   DEVICE: {config.DEVICE}")
+    print(f"   AUX_SR: {config.AUX_SR}")
     print(f"   SUBMISSION_MODE: {args.submission_mode}")
     print(f"   META: {run_meta_path}")
 
@@ -515,7 +526,8 @@ def main():
             transformer_ff_dim=config.TRANSFORMER_FF_DIM,
             dropout=config.TRANSFORMER_DROPOUT,
             use_stn=config.USE_STN,
-            backbone_type=config.BACKBONE_TYPE, 
+            backbone_type=config.BACKBONE_TYPE,
+            aux_sr=config.AUX_SR,
         ).to(config.DEVICE)
     else:
         model = MultiFrameCRNN(

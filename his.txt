@@ -1,0 +1,5 @@
+    - convnext chạy thử restran + convnext
+python train.py --model restran --backbone convnext --experiment-name restran_convnext
+/home/godminhkhoa/Document/ICPR2026/results/restran_convnext_260130_092958
+
+    - 

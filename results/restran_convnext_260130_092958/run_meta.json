@@ -1,14 +1,14 @@
 {
-  "run_id": "restran_convnext_260130_001950",
-  "started_at": "2026-01-30T00:19:50+07:00",
+  "run_id": "restran_convnext_260130_092958",
+  "started_at": "2026-01-30T09:29:58+07:00",
   "ended_at": null,
   "duration_sec": null,
-  "command": "train.py --model restran --backbone convnext --experiment-name restran_convnext --batch-size 16",
+  "command": "train.py --model restran --backbone convnext --experiment-name restran_convnext",
   "args": {
     "experiment_name": "restran_convnext",
     "model": "restran",
     "epochs": null,
-    "batch_size": 16,
+    "batch_size": null,
     "learning_rate": null,
     "data_root": null,
     "seed": null,
@@ -26,7 +26,7 @@
   "config": {
     "AUGMENTATION_LEVEL": "full",
     "BACKBONE_TYPE": "convnext",
-    "BATCH_SIZE": 16,
+    "BATCH_SIZE": 64,
     "CHAR2IDX": {
       "0": 1,
       "1": 2,
@@ -116,7 +116,7 @@
     "MODEL_TYPE": "restran",
     "NUM_CLASSES": 37,
     "NUM_WORKERS": 10,
-    "OUTPUT_DIR": "results/restran_convnext_260130_001950",
+    "OUTPUT_DIR": "results/restran_convnext_260130_092958",
     "RNN_DROPOUT": 0.25,
     "SEED": 42,
     "SPLIT_RATIO": 0.9,
@@ -132,21 +132,21 @@
     "WEIGHT_DECAY": 0.0001
   },
   "system": {
-    "hostname": "HUNTER",
-    "platform": "Linux-6.8.0-87-generic-x86_64-with-glibc2.35",
-    "python": "3.13.5 | packaged by Anaconda, Inc. | (main, Jun 12 2025, 16:09:02) [GCC 11.2.0]",
+    "hostname": "DESKTOP-MFJHDRM",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+    "python": "3.10.12 (main, Jan  8 2026, 06:52:19) [GCC 11.4.0]",
     "torch": "2.10.0+cu128",
     "cuda_available": true,
     "cuda": "12.8",
     "cudnn": 91002,
     "cuda_device": {
-      "name": "NVIDIA GeForce RTX 3050 Laptop GPU",
-      "capability": "8.6",
+      "name": "NVIDIA GeForce RTX 4060 Ti",
+      "capability": "8.9",
       "num_devices": 1
     }
   },
   "git": {
-    "commit": "3ca05c033a7af78afea606bbeccc3be58bb45da3",
+    "commit": "4493903874246cc2cd46f2004f851a35b6a20ad6",
     "branch": "main",
     "is_dirty": true
   },

@@ -7,7 +7,8 @@ from src.models.components import (
     ConvNeXtFeatureExtractor, 
     AttentionFusion, 
     PositionalEncoding, 
-    STNBlock
+    STNBlock,
+    SRDecoder
 )
 import math
 
@@ -23,11 +24,12 @@ class ResTranOCR(nn.Module):
         transformer_ff_dim: int = 2048,
         dropout: float = 0.1,
         use_stn: bool = True,
-        backbone_type: str = "convnext" # Thêm option chọn backbone
+        backbone_type: str = "convnext",
+        aux_sr: bool = False  # Thêm tham số này
     ):
         super().__init__()
         self.use_stn = use_stn
-        self.backbone_type = backbone_type
+        self.aux_sr = aux_sr 
         
         # 1. Spatial Transformer Network
         if self.use_stn:
@@ -64,10 +66,15 @@ class ResTranOCR(nn.Module):
         # 5. Prediction Head
         self.head = nn.Linear(self.cnn_channels, num_classes)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Thêm SR Decoder nếu bật flag
+        if self.aux_sr:
+            self.sr_decoder = SRDecoder(in_channels=512)
+
+    def forward(self, x, return_sr=False):
         b, f, c, h, w = x.size()
         x_flat = x.view(b * f, c, h, w)
         
+        grid = None
         if self.use_stn:
             theta = self.stn(x_flat)
             grid = F.affine_grid(theta, x_flat.size(), align_corners=False)
@@ -82,6 +89,11 @@ class ResTranOCR(nn.Module):
         if features.size(1) != self.cnn_channels:
             features = self.feature_proj(features) # [B*F, 512, 1, W']
             
+        # Nhánh SR (Chạy nếu được yêu cầu)
+        sr_out = None
+        if self.aux_sr and return_sr:
+            sr_out = self.sr_decoder(features)
+
         fused = self.fusion(features)       # [B, 512, 1, W']
         
         # Prepare for Transformer: [B, C, 1, W'] -> [B, W', C]
@@ -91,4 +103,11 @@ class ResTranOCR(nn.Module):
         seq_out = self.transformer(seq_input) 
         
         out = self.head(seq_out)
-        return out.log_softmax(2)
+        
+        log_probs = out.log_softmax(2)
+        
+        # Trả về thêm sr_out và grid để tính loss
+        if return_sr:
+            return log_probs, sr_out, grid
+            
+        return log_probs
