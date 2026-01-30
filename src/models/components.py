@@ -303,32 +303,37 @@ class PositionalEncoding(nn.Module):
     
 
 class SRDecoder(nn.Module):
+    """
+    Super-Resolution Head: Reconstructs image from features.
+    Input: [Batch, 512, 1, 32] -> Output: [Batch, 3, 32, 128]
+    """
     def __init__(self, in_channels=512):
         super().__init__()
-        # Input: [Batch, in_channels, 1, W] (Do backbone đã pool chiều cao về 1)
-        # Mục tiêu: Upsample về [Batch, 3, 32, 128]
-        
         self.net = nn.Sequential(
-            # Bước 1: Mở rộng chiều cao từ 1 lên 4
+            # Layer 1: Expand Height x4, Keep Width (H: 1->4, W: 32->32)
             nn.ConvTranspose2d(in_channels, 256, kernel_size=(4, 3), stride=(4, 1), padding=(0, 1)),
             nn.BatchNorm2d(256),
             nn.ReLU(True),
             
-            # Bước 2: Upsample tiếp lên 8 -> 16 -> 32
+            # Layer 2: Expand Both x2 (H: 4->8, W: 32->64)
             nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(True),
             
+            # Layer 3: Expand Both x2 (H: 8->16, W: 64->128)
             nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(True),
             
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            # Layer 4 (SỬA Ở ĐÂY): Expand Height x2, Keep Width (H: 16->32, W: 128->128)
+            # Dùng kernel (4,3), stride (2,1), padding (1,1) để giữ nguyên chiều rộng
+            nn.ConvTranspose2d(64, 32, kernel_size=(4, 3), stride=(2, 1), padding=(1, 1)),
             nn.BatchNorm2d(32),
             nn.ReLU(True),
             
+            # Final Conv
             nn.Conv2d(32, 3, kernel_size=3, stride=1, padding=1),
-            nn.Tanh() 
+            nn.Tanh() # Output range [-1, 1]
         )
 
     def forward(self, x):
