@@ -214,6 +214,7 @@ def write_summary_md(path: str, meta: dict):
 # ----------------------------
 # CLI
 # ----------------------------
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -229,7 +230,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--epochs", type=int, default=None,
-        help="Number of training epochs (default: from config)"
+        help="Total number of training epochs (default: from config)"
     )
     parser.add_argument(
         "--batch-size", type=int, default=None,
@@ -275,7 +276,56 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=str,
         default="results",
-        help="Directory to save checkpoints and submission files (default: results/)",
+        help="Base directory to store runs (default: results/)",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Stable run folder name/path (NO timestamp). If relative, it is under --output-dir.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite an existing run directory (only when NOT resuming).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from the last full checkpoint in the run directory.",
+    )
+    parser.add_argument(
+        "--resume-path",
+        type=str,
+        default=None,
+        help="Explicit path to a full checkpoint (.pt) to resume from.",
+    )
+    parser.add_argument(
+        "--reset-optim",
+        action="store_true",
+        help="When resuming, reset optimizer state (load weights only).",
+    )
+    parser.add_argument(
+        "--reset-scheduler",
+        action="store_true",
+        help="When resuming, reset LR scheduler state (required if batch-size/steps/epochs changed).",
+    )
+    parser.add_argument(
+        "--reset-scaler",
+        action="store_true",
+        help="When resuming, reset AMP GradScaler state.",
+    )
+    parser.add_argument(
+        "--save-every-epochs",
+        type=int,
+        default=None,
+        help="Save last checkpoint every N epochs (default: from config).",
+    )
+    parser.add_argument(
+        "--save-every-steps",
+        type=int,
+        default=None,
+        help="If >0, save last checkpoint every N train steps (slower).",
     )
     parser.add_argument(
         "--no-stn",
@@ -291,143 +341,173 @@ def parse_args() -> argparse.Namespace:
         "--run-tag",
         type=str,
         default=None,
-        help="Optional extra tag to append into run folder name (e.g., 'ablation1')",
+        help="Optional tag appended into run folder name when --run-dir is not set.",
     )
     parser.add_argument(
-        "--backbone", 
-        type=str, 
-        choices=["resnet", "convnext"], 
+        "--backbone",
+        type=str,
+        choices=["resnet", "convnext"],
         default=None,
-        help="Backbone architecture for ResTran: 'resnet' or 'convnext'"
+        help="Backbone architecture for ResTran: 'resnet' or 'convnext'",
     )
     parser.add_argument(
         "--sr-aux",
         action="store_true",
         help="Enable Super-Resolution Auxiliary Branch",
     )
-    parser.add_argument(
-        "--img-height",
-        type=int,
-        default=None,
-        help="Image height (default: from config)"
-    )
-    parser.add_argument(
-        "--img-width",
-        type=int,
-        default=None,
-        help="Image width (default: from config)"
-    )
+
+    # ---- Stronger training/inference flags (optional) ----
+    parser.add_argument("--img-height", type=int, default=None, help="Override image height (default: from config)")
+    parser.add_argument("--img-width", type=int, default=None, help="Override image width (default: from config)")
     parser.add_argument(
         "--train-lr-sim-p",
         type=float,
         default=None,
-        help="Probability of mild LR-like degradation on training images (real LR too)."
+        help="Probability of mild LR-like degradation on training images (requires patched transforms/dataset).",
     )
     parser.add_argument(
         "--frame-dropout",
         type=float,
         default=None,
-        help="Drop frames in AttentionFusion during training (0~0.5)."
+        help="Frame dropout inside AttentionFusion during training (requires patched model).",
     )
     parser.add_argument(
         "--backbone-pretrained",
         action="store_true",
-        help="Use pretrained weights for ResNet backbone (only if --backbone resnet)."
-    )
-    parser.add_argument(
-        "--beam-width",
-        type=int,
-        default=None,
-        help="CTC beam width for decoding (1=greedy)."
-    )
-    parser.add_argument(
-        "--conf-mode",
-        type=str,
-        default=None,
-        choices=["meanmax", "geom", "margin"],
-        help="Confidence mode: meanmax/geom (greedy), margin (beam)."
+        help="Use pretrained weights for ResNet backbone (only if backbone=resnet and model supports it).",
     )
     return parser.parse_args()
 
 
+
+def _resolve_run_dir(args: argparse.Namespace, exp_name: str) -> tuple[str, str]:
+    """
+    Returns (run_dir, run_name).
+    - If --run-dir is provided:
+        * if it's absolute or contains a path separator, use it as-is
+        * else use <output-dir>/<run-dir>
+    - Else: <output-dir>/<exp_name>[_run-tag]
+    """
+    if args.run_dir:
+        run_dir = args.run_dir
+        if not os.path.isabs(run_dir) and (os.sep not in run_dir):
+            run_dir = os.path.join(args.output_dir, run_dir)
+        run_dir = os.path.normpath(run_dir)
+        run_name = os.path.basename(run_dir)
+        return run_dir, run_name
+
+    run_name = exp_name
+    if args.run_tag:
+        run_name += f"_{args.run_tag}"
+    run_dir = os.path.join(args.output_dir, run_name)
+    run_dir = os.path.normpath(run_dir)
+    return run_dir, run_name
+
+
+def _load_config_json_into_config(cfg_obj: Config, cfg_json_path: str) -> None:
+    try:
+        with open(cfg_json_path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return
+    for k, v in d.items():
+        if hasattr(cfg_obj, k):
+            try:
+                setattr(cfg_obj, k, v)
+            except Exception:
+                pass
+
+
 def main():
-    """Main training entry point."""
+    """Main training entry point (supports stable run dirs + resume)."""
     args = parse_args()
 
-    # Initialize config with CLI overrides
+    # 1) Create base config and decide run directory (NO timestamp)
     config = Config()
 
-    # Map CLI arguments to config attributes
-    arg_to_config = {
-        'experiment_name': 'EXPERIMENT_NAME',
-        'model': 'MODEL_TYPE',
-        'epochs': 'EPOCHS',
-        'batch_size': 'BATCH_SIZE',
-        'learning_rate': 'LEARNING_RATE',
-        'data_root': 'DATA_ROOT',
-        'seed': 'SEED',
-        'num_workers': 'NUM_WORKERS',
-        'hidden_size': 'HIDDEN_SIZE',
-        'transformer_heads': 'TRANSFORMER_HEADS',
-        'transformer_layers': 'TRANSFORMER_LAYERS',
-    }
+    # Allow CLI exp_name to affect default run_dir naming
+    if args.experiment_name is not None:
+        config.EXPERIMENT_NAME = args.experiment_name
 
+    run_dir, run_name = _resolve_run_dir(args, config.EXPERIMENT_NAME)
+
+    # 2) Resume: load config.json from run_dir first (then CLI overrides win)
+    cfg_path = os.path.join(run_dir, "config.json")
+    run_meta_path = os.path.join(run_dir, "run_meta.json")
+
+    if args.resume:
+        if not os.path.exists(run_dir):
+            print(f"❌ ERROR: --resume nhưng run_dir không tồn tại: {run_dir}")
+            sys.exit(1)
+        if os.path.exists(cfg_path):
+            _load_config_json_into_config(config, cfg_path)
+
+    # 3) Apply CLI overrides (wins over loaded config.json)
+    arg_to_config = {
+        "experiment_name": "EXPERIMENT_NAME",
+        "model": "MODEL_TYPE",
+        "epochs": "EPOCHS",
+        "batch_size": "BATCH_SIZE",
+        "learning_rate": "LEARNING_RATE",
+        "data_root": "DATA_ROOT",
+        "seed": "SEED",
+        "num_workers": "NUM_WORKERS",
+        "hidden_size": "HIDDEN_SIZE",
+        "transformer_heads": "TRANSFORMER_HEADS",
+        "transformer_layers": "TRANSFORMER_LAYERS",
+        "img_height": "IMG_HEIGHT",
+        "img_width": "IMG_WIDTH",
+    }
     for arg_name, config_name in arg_to_config.items():
         value = getattr(args, arg_name, None)
         if value is not None:
             setattr(config, config_name, value)
 
-    # Special cases
     if args.aug_level is not None:
         config.AUGMENTATION_LEVEL = args.aug_level
-
     if args.no_stn:
         config.USE_STN = False
-
     if args.backbone is not None:
         config.BACKBONE_TYPE = args.backbone
+    config.AUX_SR = bool(args.sr_aux)
 
-    if args.sr_aux:
-        config.AUX_SR = True
-    else:
-        config.AUX_SR = False
-
+    # ---- New flag overrides (safe even if Config didn't declare them) ----
     if args.img_height is not None:
-        config.IMG_HEIGHT = args.img_height
+        config.IMG_HEIGHT = int(args.img_height)
     if args.img_width is not None:
-        config.IMG_WIDTH = args.img_width
+        config.IMG_WIDTH = int(args.img_width)
 
     if args.train_lr_sim_p is not None:
-        config.TRAIN_LR_SIM_P = float(args.train_lr_sim_p)
-
+        setattr(config, "TRAIN_LR_SIM_P", float(args.train_lr_sim_p))
     if args.frame_dropout is not None:
-        config.FRAME_DROPOUT = float(args.frame_dropout)
+        setattr(config, "FRAME_DROPOUT", float(args.frame_dropout))
+    # store backbone_pretrained for model construction if supported
+    setattr(config, "BACKBONE_PRETRAINED", bool(args.backbone_pretrained))
 
-    config.BACKBONE_PRETRAINED = bool(args.backbone_pretrained)
+    # checkpoint frequency overrides
+    if args.save_every_epochs is not None:
+        config.SAVE_EVERY_EPOCHS = int(args.save_every_epochs)
+    if args.save_every_steps is not None:
+        config.SAVE_EVERY_STEPS = int(args.save_every_steps)
 
-    if args.beam_width is not None:
-        config.BEAM_WIDTH = int(args.beam_width)
+    # 4) Create/validate run directory
+    if os.path.exists(run_dir) and (not args.resume):
+        if args.overwrite:
+            import shutil
+            shutil.rmtree(run_dir, ignore_errors=True)
+        else:
+            print(f"❌ ERROR: run_dir đã tồn tại: {run_dir}")
+            print("   - Dùng --overwrite để ghi đè, hoặc đặt --run-dir / --run-tag khác.")
+            sys.exit(1)
 
-    if args.conf_mode is not None:
-        config.CONF_MODE = str(args.conf_mode)
-
-    # Create per-run folder: results/<exp>_<timestamp>[_tag]/
-    ts = datetime.now().strftime("%y%m%d_%H%M%S")
-    exp_name = config.EXPERIMENT_NAME
-    run_name = f"{exp_name}_{ts}"
-    if args.run_tag:
-        run_name += f"_{args.run_tag}"
-    run_dir = os.path.join(args.output_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
-
-    # Output directory
     config.OUTPUT_DIR = run_dir
 
-    # Setup console logging to file
+    # 5) Setup console logging
     log_path = os.path.join(run_dir, "console.log")
     _stdout = sys.stdout
     _stderr = sys.stderr
-    log_f = open(log_path, "w", encoding="utf-8")
+    log_f = open(log_path, "a" if args.resume else "w", encoding="utf-8")
     sys.stdout = Tee(_stdout, log_f)
     sys.stderr = Tee(_stderr, log_f)
 
@@ -436,41 +516,56 @@ def main():
 
     seed_everything(config.SEED)
 
-    # Run meta: initialize early (before dataset scanning)
+    # 6) Run meta (append sessions if resuming)
     project_root = os.path.dirname(os.path.abspath(__file__))
-    run_meta = {
-        "run_id": run_name,
+    if args.resume and os.path.exists(run_meta_path):
+        try:
+            run_meta = json.load(open(run_meta_path, "r", encoding="utf-8"))
+        except Exception:
+            run_meta = {}
+    else:
+        run_meta = {}
+
+    run_meta.setdefault("run_id", run_name)
+    run_meta.setdefault("system", collect_system_info())
+    run_meta.setdefault("git", collect_git_info(project_root))
+    run_meta.setdefault("sessions", [])
+
+    run_meta["args"] = vars(args)
+    run_meta["config"] = serialize_config(config)
+    run_meta["ended_at"] = None
+    run_meta["duration_sec"] = None
+
+    run_meta["sessions"].append({
         "started_at": started_at,
         "ended_at": None,
         "duration_sec": None,
         "command": " ".join(shlex.quote(x) for x in sys.argv),
-        "args": vars(args),
-        "config": serialize_config(config),
-        "system": collect_system_info(),
-        "git": collect_git_info(project_root),
-        "dataset": {},
-        "model": {},
-        "best": {},
-        "artifacts": {},
-    }
-    run_meta_path = os.path.join(run_dir, "run_meta.json")
-    cfg_path = os.path.join(run_dir, "config.json")
+        "resume": bool(args.resume),
+        "resume_path": args.resume_path,
+    })
+
     dump_json(run_meta_path, run_meta)
     dump_json(cfg_path, run_meta["config"])
 
-    print(f"🚀 Configuration:")
-    print(f"   RUN_DIR : {run_dir}")
-    print(f"   EXPERIMENT: {config.EXPERIMENT_NAME}")
-    print(f"   MODEL: {config.MODEL_TYPE}")
-    print(f"   USE_STN: {config.USE_STN}")
-    print(f"   DATA_ROOT: {config.DATA_ROOT}")
-    print(f"   EPOCHS: {config.EPOCHS}")
-    print(f"   BATCH_SIZE: {config.BATCH_SIZE}")
-    print(f"   LEARNING_RATE: {config.LEARNING_RATE}")
-    print(f"   DEVICE: {config.DEVICE}")
-    print(f"   AUX_SR: {config.AUX_SR}")
-    print(f"   SUBMISSION_MODE: {args.submission_mode}")
-    print(f"   META: {run_meta_path}")
+    exp_name = config.EXPERIMENT_NAME
+
+    print("🚀 Configuration:")
+    print(f"   RUN_DIR        : {run_dir}")
+    print(f"   EXPERIMENT     : {exp_name}")
+    print(f"   MODEL          : {config.MODEL_TYPE}")
+    print(f"   BACKBONE       : {getattr(config, 'BACKBONE_TYPE', None)}")
+    print(f"   USE_STN        : {config.USE_STN}")
+    print(f"   DATA_ROOT      : {config.DATA_ROOT}")
+    print(f"   EPOCHS(total)  : {config.EPOCHS}")
+    print(f"   BATCH_SIZE     : {config.BATCH_SIZE}")
+    print(f"   LR             : {config.LEARNING_RATE}")
+    print(f"   DEVICE         : {config.DEVICE}")
+    print(f"   AUX_SR         : {config.AUX_SR}")
+    print(f"   SAVE_EPOCHS    : {getattr(config, 'SAVE_EVERY_EPOCHS', 1)}")
+    print(f"   SAVE_STEPS     : {getattr(config, 'SAVE_EVERY_STEPS', 0)}")
+    print(f"   RESUME         : {bool(args.resume)}")
+    print(f"   META           : {run_meta_path}")
 
     # Validate data path
     if not os.path.exists(config.DATA_ROOT):
@@ -479,15 +574,23 @@ def main():
 
     # Common dataset parameters
     common_ds_params = {
-        'split_ratio': config.SPLIT_RATIO,
-        'img_height': config.IMG_HEIGHT,
-        'img_width': config.IMG_WIDTH,
-        'char2idx': config.CHAR2IDX,
-        'val_split_file': config.VAL_SPLIT_FILE,
-        'seed': config.SEED,
-        'augmentation_level': config.AUGMENTATION_LEVEL,
-        'train_lr_sim_p': getattr(config, "TRAIN_LR_SIM_P", 0.0),
+        "split_ratio": config.SPLIT_RATIO,
+        "img_height": config.IMG_HEIGHT,
+        "img_width": config.IMG_WIDTH,
+        "char2idx": config.CHAR2IDX,
+        "val_split_file": config.VAL_SPLIT_FILE,
+        "seed": config.SEED,
+        "augmentation_level": config.AUGMENTATION_LEVEL,
     }
+
+    # Optional: mild LR simulation probability for REAL LR frames (only if dataset supports it)
+    try:
+        import inspect
+        if "train_lr_sim_p" in inspect.signature(MultiFrameDataset.__init__).parameters:
+            common_ds_params["train_lr_sim_p"] = float(getattr(config, "TRAIN_LR_SIM_P", 0.0))
+    except Exception:
+        pass
+
 
     # Create datasets based on mode
     if args.submission_mode:
@@ -497,17 +600,16 @@ def main():
 
         train_ds = MultiFrameDataset(
             root_dir=config.DATA_ROOT,
-            mode='train',
+            mode="train",
             full_train=True,
-            **common_ds_params
+            **common_ds_params,
         )
 
-        # Create test dataset if test data exists
         test_loader = None
         if os.path.exists(config.TEST_DATA_ROOT):
             test_ds = MultiFrameDataset(
                 root_dir=config.TEST_DATA_ROOT,
-                mode='val',
+                mode="val",
                 img_height=config.IMG_HEIGHT,
                 img_width=config.IMG_WIDTH,
                 char2idx=config.CHAR2IDX,
@@ -520,7 +622,7 @@ def main():
                 shuffle=False,
                 collate_fn=MultiFrameDataset.collate_fn,
                 num_workers=config.NUM_WORKERS,
-                pin_memory=True
+                pin_memory=True,
             )
         else:
             print(f"⚠️ WARNING: Test data not found at {config.TEST_DATA_ROOT}")
@@ -530,14 +632,14 @@ def main():
     else:
         train_ds = MultiFrameDataset(
             root_dir=config.DATA_ROOT,
-            mode='train',
-            **common_ds_params
+            mode="train",
+            **common_ds_params,
         )
 
         val_ds = MultiFrameDataset(
             root_dir=config.DATA_ROOT,
-            mode='val',
-            **common_ds_params
+            mode="val",
+            **common_ds_params,
         )
 
         val_loader = None
@@ -548,7 +650,7 @@ def main():
                 shuffle=False,
                 collate_fn=MultiFrameDataset.collate_fn,
                 num_workers=config.NUM_WORKERS,
-                pin_memory=True
+                pin_memory=True,
             )
         else:
             print("⚠️ WARNING: Validation dataset is empty.")
@@ -559,7 +661,6 @@ def main():
         print("❌ Training dataset is empty!")
         sys.exit(1)
 
-    # Update meta with dataset sizes
     run_meta["dataset"] = {
         "train_size": len(train_ds),
         "val_size": (len(val_ds) if val_ds is not None else 0),
@@ -569,19 +670,28 @@ def main():
     }
     dump_json(run_meta_path, run_meta)
 
-    # Create training data loader
     train_loader = DataLoader(
         train_ds,
         batch_size=config.BATCH_SIZE,
         shuffle=True,
         collate_fn=MultiFrameDataset.collate_fn,
         num_workers=config.NUM_WORKERS,
-        pin_memory=True
+        pin_memory=True,
     )
 
     # Initialize model based on config
+
+    # Helper: pass only kwargs supported by the target callable (keeps backward compatibility)
+    def _filter_kwargs(callable_obj, kwargs: dict) -> dict:
+        try:
+            import inspect
+            sig = inspect.signature(callable_obj)
+            return {k: v for k, v in kwargs.items() if k in sig.parameters}
+        except Exception:
+            return kwargs
+
     if config.MODEL_TYPE == "restran":
-        model = ResTranOCR(
+        restran_kwargs = dict(
             num_classes=config.NUM_CLASSES,
             transformer_heads=config.TRANSFORMER_HEADS,
             transformer_layers=config.TRANSFORMER_LAYERS,
@@ -590,19 +700,21 @@ def main():
             use_stn=config.USE_STN,
             backbone_type=config.BACKBONE_TYPE,
             aux_sr=config.AUX_SR,
-            frame_dropout=getattr(config, "FRAME_DROPOUT", 0.0),
-            backbone_pretrained=getattr(config, "BACKBONE_PRETRAINED", False),
-        ).to(config.DEVICE)
+            # optional extras (only used if your ResTranOCR __init__ supports them)
+            frame_dropout=float(getattr(config, "FRAME_DROPOUT", 0.0)),
+            backbone_pretrained=bool(getattr(config, "BACKBONE_PRETRAINED", False)),
+        )
+        model = ResTranOCR(**_filter_kwargs(ResTranOCR, restran_kwargs)).to(config.DEVICE)
     else:
-        model = MultiFrameCRNN(
+        crnn_kwargs = dict(
             num_classes=config.NUM_CLASSES,
             hidden_size=config.HIDDEN_SIZE,
             rnn_dropout=config.RNN_DROPOUT,
             use_stn=config.USE_STN,
-            frame_dropout=getattr(config, "FRAME_DROPOUT", 0.0),
-        ).to(config.DEVICE)
+            frame_dropout=float(getattr(config, "FRAME_DROPOUT", 0.0)),
+        )
+        model = MultiFrameCRNN(**_filter_kwargs(MultiFrameCRNN, crnn_kwargs)).to(config.DEVICE)
 
-    # Print model summary
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"📊 Model ({config.MODEL_TYPE}): {total_params:,} total params, {trainable_params:,} trainable")
@@ -615,14 +727,75 @@ def main():
     }
     dump_json(run_meta_path, run_meta)
 
-    # Initialize trainer and start training
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         config=config,
-        idx2char=config.IDX2CHAR
+        idx2char=config.IDX2CHAR,
     )
+
+    # 7) Resume from checkpoint (FULL state)
+    resumed_from = None
+    if args.resume or args.resume_path:
+        ckpt_path = args.resume_path
+        if ckpt_path is None:
+            ckpt_dirname = getattr(config, "CKPT_DIRNAME", "checkpoints")
+            ckpt_path = os.path.join(run_dir, ckpt_dirname, "last.pt")
+        if os.path.exists(ckpt_path):
+            print(f"🔁 Resuming from checkpoint: {ckpt_path}")
+            trainer.load_checkpoint(
+                ckpt_path,
+                reset_optimizer=bool(args.reset_optim),
+                reset_scheduler=bool(args.reset_scheduler),
+                reset_scaler=bool(args.reset_scaler),
+            )
+            resumed_from = ckpt_path
+            print(f"   -> next_epoch={trainer.current_epoch} | best_acc={trainer.best_acc:.2f}%")
+        else:
+            # Fallback: weights-only last (optimizer reset)
+            last_w = os.path.join(run_dir, f"{exp_name}_last.pth")
+            if os.path.exists(last_w):
+                print(f"⚠️ Full ckpt not found. Loading weights-only: {last_w} (optimizer/scheduler reset)")
+                model.load_state_dict(torch.load(last_w, map_location=config.DEVICE))
+                resumed_from = last_w
+            else:
+                print(f"⚠️ Resume requested but checkpoint not found: {ckpt_path}")
+
+    run_meta.setdefault("resume", {})
+    run_meta["resume"] = {
+        "enabled": bool(args.resume or args.resume_path),
+        "resumed_from": resumed_from,
+        "reset_optim": bool(args.reset_optim),
+        "reset_scheduler": bool(args.reset_scheduler),
+        "reset_scaler": bool(args.reset_scaler),
+    }
+    dump_json(run_meta_path, run_meta)
+
+    # 8) Save-on-signal (SIGTERM/SIGINT)
+    def _handle_signal(sig, frame):
+        try:
+            print(f"\n⏸️ Received signal {sig}. Saving checkpoint then exit...")
+            trainer.save_last_weights()
+            trainer.save_checkpoint("last", extra={"signal": int(sig)})
+            print("✅ Checkpoint saved.")
+        except Exception as e:
+            print(f"⚠️ Failed to save checkpoint on signal: {e}")
+        finally:
+            sys.stdout = _stdout
+            sys.stderr = _stderr
+            try:
+                log_f.close()
+            except Exception:
+                pass
+        raise SystemExit(0)
+
+    try:
+        import signal
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+    except Exception:
+        pass
 
     # ----------------------------
     # Fit + collect history (best-effort)
@@ -630,57 +803,40 @@ def main():
     try:
         trainer.fit()
     finally:
-        # Always try to save artifacts even if interrupted
         ended_at = _now_iso()
         duration_sec = round(time.time() - t0, 2)
 
-        # Try to fetch history from trainer
-        history = None
-        if hasattr(trainer, "get_history") and callable(getattr(trainer, "get_history")):
-            try:
-                history = trainer.get_history()
-            except Exception:
-                history = None
-        if history is None and hasattr(trainer, "history"):
-            try:
-                history = list(getattr(trainer, "history"))
-            except Exception:
-                history = None
-
-        metrics_csv = os.path.join(run_dir, "metrics.csv")
-        metrics_json = os.path.join(run_dir, "metrics.json")
-        if history:
-            dump_csv(metrics_csv, history)
-            dump_json(metrics_json, {"history": history})
-            run_meta["artifacts"]["metrics_csv"] = metrics_csv
-            run_meta["artifacts"]["metrics_json"] = metrics_json
-
-            # best-effort "best" extraction: pick row with max val_exact if exists, else max val_acc, else min val_loss
-            best_row = None
-            key_candidates = ["val_exact", "val_acc", "val_accuracy", "val_em", "val_score"]
-            for k in key_candidates:
-                if any((k in r) for r in history):
-                    best_row = max(history, key=lambda r: (r.get(k, float("-inf"))))
-                    run_meta["best"] = {"criterion": f"max({k})", **best_row}
-                    break
-            if best_row is None:
-                if any(("val_loss" in r) for r in history):
-                    best_row = min(history, key=lambda r: (r.get("val_loss", float("inf"))))
-                    run_meta["best"] = {"criterion": "min(val_loss)", **best_row}
-        else:
-            run_meta["best"] = run_meta.get("best", {})
-
-        # Check best checkpoint path
-        best_model_path = os.path.join(config.OUTPUT_DIR, f"{exp_name}_best.pth")
-        last_model_path = os.path.join(config.OUTPUT_DIR, f"{exp_name}_last.pth")
-        if os.path.exists(best_model_path):
-            run_meta["best"]["best_ckpt"] = best_model_path
-            run_meta["artifacts"]["best_ckpt"] = best_model_path
-        if os.path.exists(last_model_path):
-            run_meta["artifacts"]["last_ckpt"] = last_model_path
+        # Update session info
+        try:
+            sess = run_meta.get("sessions", [])
+            if sess:
+                sess[-1]["ended_at"] = ended_at
+                sess[-1]["duration_sec"] = duration_sec
+        except Exception:
+            pass
 
         run_meta["ended_at"] = ended_at
         run_meta["duration_sec"] = duration_sec
+
+        # artifacts: weights + full checkpoints
+        best_model_path = os.path.join(config.OUTPUT_DIR, f"{exp_name}_best.pth")
+        last_model_path = os.path.join(config.OUTPUT_DIR, f"{exp_name}_last.pth")
+        ckpt_dirname = getattr(config, "CKPT_DIRNAME", "checkpoints")
+        best_full_path = os.path.join(config.OUTPUT_DIR, ckpt_dirname, "best.pt")
+        last_full_path = os.path.join(config.OUTPUT_DIR, ckpt_dirname, "last.pt")
+
+        run_meta.setdefault("artifacts", {})
+        if os.path.exists(best_model_path):
+            run_meta.setdefault("best", {})
+            run_meta["best"]["best_ckpt"] = best_model_path
+            run_meta["artifacts"]["best_weights"] = best_model_path
+        if os.path.exists(last_model_path):
+            run_meta["artifacts"]["last_weights"] = last_model_path
+        if os.path.exists(best_full_path):
+            run_meta["artifacts"]["best_full_ckpt"] = best_full_path
+        if os.path.exists(last_full_path):
+            run_meta["artifacts"]["last_full_ckpt"] = last_full_path
+
         run_meta["artifacts"]["run_meta"] = run_meta_path
         run_meta["artifacts"]["config"] = cfg_path
         run_meta["artifacts"]["console_log"] = log_path
@@ -705,11 +861,10 @@ def main():
     # Run test inference in submission mode
     # ----------------------------
     if args.submission_mode and test_loader is not None:
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("📝 GENERATING SUBMISSION FILE")
-        print("="*60)
+        print("=" * 60)
 
-        # Load best checkpoint if it exists
         best_model_path = os.path.join(config.OUTPUT_DIR, f"{exp_name}_best.pth")
         if os.path.exists(best_model_path):
             print(f"📦 Loading best checkpoint: {best_model_path}")
@@ -717,14 +872,11 @@ def main():
         else:
             print("⚠️ No best checkpoint found, using final model weights")
 
-        # Run inference on test data
         out_name = f"submission_{exp_name}_final.txt"
         trainer.predict_test(test_loader, output_filename=out_name)
 
-        # Update meta with submission artifact
         sub_path = os.path.join(config.OUTPUT_DIR, out_name)
         if os.path.exists(sub_path):
-            run_meta_path = os.path.join(config.OUTPUT_DIR, "run_meta.json")
             try:
                 meta = json.load(open(run_meta_path, "r", encoding="utf-8"))
             except Exception:

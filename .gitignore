@@ -32,3 +32,5 @@ logs/
 # Temporary/Generated files
 repomix-output.xml
 notebook.ipynb
+
+results/

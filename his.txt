@@ -3,4 +3,28 @@ python train.py -m restran --backbone convnext \
   --img-width 160 \
   --train-lr-sim-p 0.35 \
   --frame-dropout 0.20 \
-  --run-tag lrSim035_fd02_w160
+  --run-tag lrSim035_fd02_w160 \
+  --batch-size 64
+
+-> Val Acc 78.88% | Public test with val 0.755
+
+python train.py -m restran --backbone convnext \
+  --aug-level full \
+  --epochs 30 \
+  --img-width 192 \
+  --train-lr-sim-p 0.35 \
+  --frame-dropout 0.20 \
+  --run-tag E6_w192_lrSim035_fd020 \
+  --batch-size 32
+
+python train.py -m restran --backbone convnext \
+  --aug-level full \
+  --epochs 30 \
+  --run-tag restran_convnext \
+  --batch-size 256
+
+-> Val Acc 76.38% | Public test with val 0.749
+
+
+
+restran + stn baselin: val acc 77.9% | Public test without val 0.756

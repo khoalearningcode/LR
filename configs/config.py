@@ -49,16 +49,14 @@ class Config:
     TRANSFORMER_FF_DIM: int = 2048
     TRANSFORMER_DROPOUT: float = 0.1
     
-    # ---- New flags for stronger training/inference ----
-    TRAIN_LR_SIM_P: float = 0.0      # Aug nhẹ giống LR test cho cả real LR
-    FRAME_DROPOUT: float = 0.0       # Drop frame trong AttentionFusion (training only)
-    BACKBONE_PRETRAINED: bool = False  # Chỉ dùng khi BACKBONE_TYPE="resnet"
-    
-    BEAM_WIDTH: int = 1              # 1=greedy; >1=beam
-    CONF_MODE: str = "meanmax"       # meanmax | geom | margin
-    
     DEVICE: torch.device = field(default_factory=lambda: torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     OUTPUT_DIR: str = "results"
+
+    # Checkpointing / resume
+    CKPT_DIRNAME: str = "checkpoints"  # subfolder inside OUTPUT_DIR
+    SAVE_EVERY_EPOCHS: int = 1           # save last checkpoint every N epochs
+    SAVE_EVERY_STEPS: int = 0            # if >0, also save every N train steps (slower)
+    KEEP_LAST_K: int = 2                 # keep last K periodic checkpoints (optional)
     
     # Derived attributes (computed in __post_init__)
     CHAR2IDX: Dict[str, int] = field(default_factory=dict, init=False)
