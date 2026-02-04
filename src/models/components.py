@@ -4,6 +4,26 @@ import torch.nn.functional as F
 from torchvision.models import ResNet34_Weights, resnet34
 import math
 
+class DropPath(nn.Module):
+    """Stochastic Depth / DropPath (per-sample).
+
+    This is a light-weight regularization that helps when scaling ConvNeXt depth.
+    """
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = float(drop_prob)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.drop_prob == 0.0 or (not self.training):
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        # Work with tensors of any dimensionality
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()
+        return x.div(keep_prob) * random_tensor
+
+
 class LayerNorm2d(nn.Module):
     """LayerNorm that supports [N, C, H, W] inputs."""
     def __init__(self, normalized_shape, eps=1e-6):
@@ -32,7 +52,7 @@ class ConvNeXtBlock(nn.Module):
         self.pwconv2 = nn.Linear(4 * dim, dim)
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)), 
                                     requires_grad=True) if layer_scale_init_value > 0 else None
-        self.drop_path = nn.Identity()  # Placeholder, can add DropPath if needed
+        self.drop_path = DropPath(drop_path) if drop_path and drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
         input = x
@@ -56,7 +76,7 @@ class ConvNeXtFeatureExtractor(nn.Module):
     Input: [N, 3, 32, 128]
     Output: [N, dims[-1], 1, 32] (Sequence length ~32)
     """
-    def __init__(self, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]):
+    def __init__(self, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], drop_path_rate: float = 0.0, layer_scale_init_value: float = 1e-6):
         super().__init__()
         self.downsample_layers = nn.ModuleList()
         
@@ -93,11 +113,23 @@ class ConvNeXtFeatureExtractor(nn.Module):
         self.downsample_layers.append(downsample_layer3)
 
         self.stages = nn.ModuleList()
+
+        # Stochastic depth decay rule
+        total_blocks = sum(depths)
+        dp_rates = torch.linspace(0, float(drop_path_rate), total_blocks).tolist() if total_blocks > 0 else []
+        cur = 0
         for i in range(4):
-            stage = nn.Sequential(
-                *[ConvNeXtBlock(dim=dims[i]) for _ in range(depths[i])]
-            )
-            self.stages.append(stage)
+            blocks = []
+            for j in range(depths[i]):
+                blocks.append(
+                    ConvNeXtBlock(
+                        dim=dims[i],
+                        drop_path=float(dp_rates[cur + j]) if dp_rates else 0.0,
+                        layer_scale_init_value=layer_scale_init_value,
+                    )
+                )
+            cur += depths[i]
+            self.stages.append(nn.Sequential(*blocks))
 
         self.final_norm = LayerNorm2d(dims[-1], eps=1e-6)
         
@@ -162,16 +194,17 @@ class AttentionFusion(nn.Module):
     """
     Attention-based fusion module for combining multi-frame features.
     Computes a weighted sum of features from multiple frames based on their 'quality' scores.
-    Supports frame dropout during training for regularization.
     """
-    def __init__(self, channels: int, frame_dropout: float = 0.0):
+    def __init__(self, channels: int, num_frames: int = 5, frame_dropout: float = 0.0):
         super().__init__()
+        self.num_frames = int(num_frames)
         self.frame_dropout = float(frame_dropout)
+
         # A small CNN to predict attention scores (quality map) from features
         self.score_net = nn.Sequential(
-            nn.Conv2d(channels, channels // 8, kernel_size=1),
+            nn.Conv2d(channels, max(1, channels // 8), kernel_size=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(channels // 8, 1, kernel_size=1)
+            nn.Conv2d(max(1, channels // 8), 1, kernel_size=1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -182,28 +215,101 @@ class AttentionFusion(nn.Module):
             Fused feature map. Shape: [Batch, C, H, W]
         """
         total_frames, c, h, w = x.size()
-        num_frames = 5  # Fixed based on dataset
-        batch_size = total_frames // num_frames
+        nf = self.num_frames
+        assert total_frames % nf == 0, f"Expected total_frames % num_frames == 0, got {total_frames} vs {nf}"
+        batch_size = total_frames // nf
 
         # Reshape to [Batch, Frames, C, H, W]
-        x_view = x.view(batch_size, num_frames, c, h, w)
-        
-        # Calculate attention scores: [Batch, Frames, 1, H, W]
-        scores = self.score_net(x).view(batch_size, num_frames, 1, h, w)
-        
-        # NEW: frame dropout (training only)
-        if self.training and self.frame_dropout > 0:
-            drop_mask = (torch.rand(batch_size, num_frames, 1, 1, 1, device=scores.device)
-                         < self.frame_dropout)
-            scores = scores.masked_fill(drop_mask, -1e4)
-        
-        weights = F.softmax(scores, dim=1)  # Normalize scores across frames
+        x_view = x.view(batch_size, nf, c, h, w)
 
-        # Weighted sum fusion
+        # Scores: [Batch, Frames, 1, H, W]
+        scores = self.score_net(x).view(batch_size, nf, 1, h, w)
+
+        # Frame dropout (train-time only): force fusion to not overfit to one frame
+        if self.training and self.frame_dropout > 0.0:
+            keep = (torch.rand(batch_size, nf, device=x.device) >= self.frame_dropout)  # [B, F]
+            # Ensure at least one frame kept for each sample
+            none = ~keep.any(dim=1)
+            if none.any():
+                ridx = torch.randint(0, nf, (int(none.sum().item()),), device=x.device)
+                keep[none, ridx] = True
+            keep = keep.view(batch_size, nf, 1, 1, 1)
+            scores = scores.masked_fill(~keep, -1e4)
+
+        weights = F.softmax(scores, dim=1)
         fused_features = torch.sum(x_view * weights, dim=1)
         return fused_features
 
 
+class TemporalTransformerFusion(nn.Module):
+    """Temporal transformer across frames (per-timestep), then attention pooling.
+
+    Input:  features from all frames  [B*F, C, 1, W]
+    Output: fused features             [B,   C, 1, W]
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_frames: int = 5,
+        nhead: int = 8,
+        num_layers: int = 2,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        frame_dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.num_frames = int(num_frames)
+        self.frame_dropout = float(frame_dropout)
+
+        if d_model % nhead != 0:
+            raise ValueError(f"TemporalTransformerFusion: d_model ({d_model}) must be divisible by nhead ({nhead}).")
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.score = nn.Linear(d_model, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        total_frames, c, h, w = x.size()
+        nf = self.num_frames
+        assert total_frames % nf == 0, f"Expected total_frames % num_frames == 0, got {total_frames} vs {nf}"
+        b = total_frames // nf
+
+        # [B, F, C, H, W] -> squeeze H (should be 1) -> [B, F, C, W]
+        x = x.view(b, nf, c, h, w).squeeze(3)
+
+        # Arrange as per-width timestep batches:
+        # [B, F, C, W] -> [B, W, F, C] -> [B*W, F, C]
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = x.view(b * w, nf, c)
+
+        src_key_padding_mask = None
+        if self.training and self.frame_dropout > 0.0:
+            keep = (torch.rand(b * w, nf, device=x.device) >= self.frame_dropout)
+            none = ~keep.any(dim=1)
+            if none.any():
+                ridx = torch.randint(0, nf, (int(none.sum().item()),), device=x.device)
+                keep[none, ridx] = True
+            src_key_padding_mask = ~keep  # True means "masked / ignored" for TransformerEncoder
+
+        x_enc = self.encoder(x, src_key_padding_mask=src_key_padding_mask)  # [B*W, F, C]
+
+        scores = self.score(x_enc).squeeze(-1)  # [B*W, F]
+        if src_key_padding_mask is not None:
+            scores = scores.masked_fill(src_key_padding_mask, -1e4)
+
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # [B*W, F, 1]
+        fused = (x_enc * weights).sum(dim=1)  # [B*W, C]
+
+        # Back to feature map: [B*W, C] -> [B, C, 1, W]
+        fused = fused.view(b, w, c).permute(0, 2, 1).unsqueeze(2).contiguous()
+        return fused
 class CNNBackbone(nn.Module):
     """A simple CNN backbone for CRNN baseline."""
     def __init__(self, out_channels=512):
