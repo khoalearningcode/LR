@@ -99,7 +99,9 @@ def decode_with_confidence(
                 group_list = list(group)
                 group_size = len(group_list)
                 if char_idx != 0:
-                    pred_chars.append(idx2char.get(int(char_idx), ""))
+                    # AFTER
+                    k = int(char_idx)
+                    pred_chars.append(idx2char.get(k, idx2char.get(str(k), '')))
                     group_probs = probs_b[time_idx:time_idx + group_size]
                     confidences.append(float(np.max(group_probs)))
                 time_idx += group_size
