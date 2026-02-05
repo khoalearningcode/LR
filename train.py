@@ -265,40 +265,6 @@ def parse_args() -> argparse.Namespace:
         "--transformer-layers", type=int, default=None,
         help="Number of transformer encoder layers (default: from config)"
     )
-
-    parser.add_argument(
-        "--transformer-ff-dim", type=int, default=None,
-        help="Transformer FFN dimension (ResTran) (default: from config)"
-    )
-    parser.add_argument(
-        "--transformer-dropout", type=float, default=None,
-        help="Transformer dropout (ResTran) (default: from config)"
-    )
-    parser.add_argument(
-        "--cnn-channels", type=int, default=None,
-        help="Embedding width / d_model after backbone (512 or 768 recommended) (default: from config)"
-    )
-    parser.add_argument(
-        "--drop-path-rate", type=float, default=None,
-        help="ConvNeXt stochastic depth rate (0.0~0.2) (default: from config)"
-    )
-    parser.add_argument(
-        "--fusion",
-        type=str,
-        choices=["attn", "temporal"],
-        default=None,
-        help="Multi-frame fusion type: attn | temporal (default: from config)",
-    )
-    parser.add_argument("--temporal-heads", type=int, default=None, help="Temporal fusion transformer heads (default: from config)")
-    parser.add_argument("--temporal-layers", type=int, default=None, help="Temporal fusion transformer layers (default: from config)")
-    parser.add_argument("--temporal-ff-dim", type=int, default=None, help="Temporal fusion transformer FF dim (default: from config)")
-    parser.add_argument("--temporal-dropout", type=float, default=None, help="Temporal fusion transformer dropout (default: from config)")
-    parser.add_argument(
-        "--grad-accum-steps",
-        type=int,
-        default=None,
-        help="Gradient accumulation steps (>=1). Effective batch = batch_size * grad_accum_steps.",
-    )
     parser.add_argument(
         "--aug-level",
         type=str,
@@ -380,9 +346,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backbone",
         type=str,
-        choices=["resnet", "convnext", "convnext_tiny", "convnext_mid", "convnext_small", "convnext_base"],
+        choices=["resnet", "convnext"],
         default=None,
         help="Backbone architecture for ResTran: 'resnet' or 'convnext'",
+    )
+    
+    parser.add_argument(
+        "--backbone-variant",
+        type=str,
+        choices=["tiny", "small", "base"],
+        default=None,
+        help="ConvNeXt variant when --backbone=convnext (tiny|small|base). Default: from config.",
+    )
+    parser.add_argument(
+        "--droppath",
+        type=float,
+        default=None,
+        help="Stochastic depth rate for ConvNeXt blocks (0.0 ~ 0.3). Default: from config.",
     )
     parser.add_argument(
         "--sr-aux",
@@ -489,16 +469,6 @@ def main():
         "hidden_size": "HIDDEN_SIZE",
         "transformer_heads": "TRANSFORMER_HEADS",
         "transformer_layers": "TRANSFORMER_LAYERS",
-        "transformer_ff_dim": "TRANSFORMER_FF_DIM",
-        "transformer_dropout": "TRANSFORMER_DROPOUT",
-        "cnn_channels": "CNN_CHANNELS",
-        "drop_path_rate": "DROPPATH_RATE",
-        "fusion": "FUSION_TYPE",
-        "temporal_heads": "TEMPORAL_HEADS",
-        "temporal_layers": "TEMPORAL_LAYERS",
-        "temporal_ff_dim": "TEMPORAL_FF_DIM",
-        "temporal_dropout": "TEMPORAL_DROPOUT",
-        "grad_accum_steps": "GRAD_ACCUM_STEPS",
         "img_height": "IMG_HEIGHT",
         "img_width": "IMG_WIDTH",
     }
@@ -513,6 +483,12 @@ def main():
         config.USE_STN = False
     if args.backbone is not None:
         config.BACKBONE_TYPE = args.backbone
+
+    if getattr(args, "backbone_variant", None):
+        config.BACKBONE_VARIANT = args.backbone_variant
+    if getattr(args, "droppath", None) is not None:
+        config.DROPPATH_RATE = float(args.droppath)
+
     config.AUX_SR = bool(args.sr_aux)
 
     # ---- New flag overrides (safe even if Config didn't declare them) ----
@@ -599,10 +575,6 @@ def main():
     print(f"   EXPERIMENT     : {exp_name}")
     print(f"   MODEL          : {config.MODEL_TYPE}")
     print(f"   BACKBONE       : {getattr(config, 'BACKBONE_TYPE', None)}")
-    print(f"   CNN_CHANNELS   : {getattr(config, 'CNN_CHANNELS', None)}")
-    print(f"   FUSION         : {getattr(config, 'FUSION_TYPE', None)} | FD={getattr(config, 'FRAME_DROPOUT', None)}")
-    print(f"   DROPPATH       : {getattr(config, 'DROPPATH_RATE', None)}")
-    print(f"   GRAD_ACCUM     : {getattr(config, 'GRAD_ACCUM_STEPS', 1)}")
     print(f"   USE_STN        : {config.USE_STN}")
     print(f"   DATA_ROOT      : {config.DATA_ROOT}")
     print(f"   EPOCHS(total)  : {config.EPOCHS}")
@@ -747,15 +719,9 @@ def main():
             dropout=config.TRANSFORMER_DROPOUT,
             use_stn=config.USE_STN,
             backbone_type=config.BACKBONE_TYPE,
-            aux_sr=config.AUX_SR,
-            cnn_channels=int(getattr(config, "CNN_CHANNELS", 512)),
-            fusion_type=str(getattr(config, "FUSION_TYPE", "attn")),
+            backbone_variant=getattr(config, "BACKBONE_VARIANT", "tiny"),
             drop_path_rate=float(getattr(config, "DROPPATH_RATE", 0.0)),
-            temporal_heads=int(getattr(config, "TEMPORAL_HEADS", 8)),
-            temporal_layers=int(getattr(config, "TEMPORAL_LAYERS", 2)),
-            temporal_ff_dim=int(getattr(config, "TEMPORAL_FF_DIM", 1024)),
-            temporal_dropout=float(getattr(config, "TEMPORAL_DROPOUT", 0.1)),
-
+            aux_sr=config.AUX_SR,
             # optional extras (only used if your ResTranOCR __init__ supports them)
             frame_dropout=float(getattr(config, "FRAME_DROPOUT", 0.0)),
             backbone_pretrained=bool(getattr(config, "BACKBONE_PRETRAINED", False)),

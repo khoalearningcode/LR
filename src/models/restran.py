@@ -1,31 +1,20 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+# Import ConvNeXtFeatureExtractor vừa thêm
 from src.models.components import (
-    ResNetFeatureExtractor,
-    ConvNeXtFeatureExtractor,
-    AttentionFusion,
-    TemporalTransformerFusion,
-    PositionalEncoding,
+    ResNetFeatureExtractor, 
+    ConvNeXtFeatureExtractor, 
+    AttentionFusion, 
+    PositionalEncoding, 
     STNBlock,
-    SRDecoder,
+    SRDecoder
 )
-
+import math
 
 class ResTranOCR(nn.Module):
     """
-    Multi-frame OCR model:
-      (5 frames) -> [optional STN] -> backbone (ConvNeXt/ResNet) -> feature proj (d_model)
-      -> fusion across frames (attn OR temporal transformer)
-      -> Transformer encoder over width -> CTC head
-
-    New scaling knobs:
-      - backbone_type: convnext_tiny/mid/small/base
-      - drop_path_rate: stochastic depth for ConvNeXt
-      - cnn_channels: d_model width (512 or 768 recommended)
-      - fusion_type: "attn" or "temporal"
-      - temporal_*: params for temporal fusion transformer (if enabled)
+    Modern OCR architecture using optional STN, ConvNeXt/ResNet and Transformer.
     """
     def __init__(
         self,
@@ -36,122 +25,57 @@ class ResTranOCR(nn.Module):
         dropout: float = 0.1,
         use_stn: bool = True,
         backbone_type: str = "convnext",
-        aux_sr: bool = False,
-        # ---- new knobs ----
-        cnn_channels: int = 512,
-        fusion_type: str = "attn",
-        frame_dropout: float = 0.0,
+        backbone_variant: str = "tiny",
         drop_path_rate: float = 0.0,
-        backbone_pretrained: bool = False,  # only for resnet
-        temporal_heads: int = 8,
-        temporal_layers: int = 2,
-        temporal_ff_dim: int = 1024,
-        temporal_dropout: float = 0.1,
-        num_frames: int = 5,
+        aux_sr: bool = False  # Thêm tham số này
     ):
         super().__init__()
-        self.use_stn = bool(use_stn)
-        self.aux_sr = bool(aux_sr)
-        self.num_frames = int(num_frames)
-
-        self.cnn_channels = int(cnn_channels)
-        self.fusion_type = str(fusion_type)
-
-        # 1) STN
+        self.use_stn = use_stn
+        self.aux_sr = aux_sr 
+        
+        # 1. Spatial Transformer Network
         if self.use_stn:
             self.stn = STNBlock(in_channels=3)
 
-        # 2) Backbone
-        backbone_type = (backbone_type or "convnext").lower()
-        if backbone_type in ["convnext", "convnext_tiny"]:
-            depths = [3, 3, 9, 3]
-            dims = [96, 192, 384, 768]
-            self.backbone = ConvNeXtFeatureExtractor(depths=depths, dims=dims, drop_path_rate=float(drop_path_rate))
-            self.backbone_out_channels = dims[-1]
-        elif backbone_type in ["convnext_mid", "convnext_medium", "convnext_m"]:
-            depths = [3, 3, 18, 3]
-            dims = [96, 192, 384, 768]
-            self.backbone = ConvNeXtFeatureExtractor(depths=depths, dims=dims, drop_path_rate=float(drop_path_rate))
-            self.backbone_out_channels = dims[-1]
-        elif backbone_type in ["convnext_small", "convnext_s"]:
-            depths = [3, 3, 27, 3]
-            dims = [96, 192, 384, 768]
-            self.backbone = ConvNeXtFeatureExtractor(depths=depths, dims=dims, drop_path_rate=float(drop_path_rate))
-            self.backbone_out_channels = dims[-1]
-        elif backbone_type in ["convnext_base", "convnext_b"]:
-            # Very heavy. Only try if you have enough GPU.
-            depths = [3, 3, 27, 3]
-            dims = [128, 256, 512, 1024]
-            self.backbone = ConvNeXtFeatureExtractor(depths=depths, dims=dims, drop_path_rate=float(drop_path_rate))
-            self.backbone_out_channels = dims[-1]
+        # 2. Backbone Selection
+        if backbone_type == "convnext":
+            self.backbone = ConvNeXtFeatureExtractor(variant=backbone_variant, drop_path_rate=drop_path_rate)
+            self.backbone_out_channels = int(getattr(self.backbone, "out_channels", 768))  # from variant
         else:
-            # resnet
-            self.backbone = ResNetFeatureExtractor(pretrained=bool(backbone_pretrained))
-            self.backbone_out_channels = 512
-
-        # 3) Project backbone features -> d_model (cnn_channels)
-        if self.backbone_out_channels == self.cnn_channels:
-            self.feature_proj = nn.Identity()
-        else:
-            self.feature_proj = nn.Conv2d(self.backbone_out_channels, self.cnn_channels, kernel_size=1)
-
-        # 4) Fusion across frames
-        if self.fusion_type == "temporal":
-            self.fusion = TemporalTransformerFusion(
-                d_model=self.cnn_channels,
-                num_frames=self.num_frames,
-                nhead=int(temporal_heads),
-                num_layers=int(temporal_layers),
-                dim_feedforward=int(temporal_ff_dim),
-                dropout=float(temporal_dropout),
-                frame_dropout=float(frame_dropout),
-            )
-        else:
-            # default: attention fusion
-            self.fusion = AttentionFusion(
-                channels=self.cnn_channels,
-                num_frames=self.num_frames,
-                frame_dropout=float(frame_dropout),
-            )
-
-        # 5) Transformer encoder over width
-        if self.cnn_channels % int(transformer_heads) != 0:
-            raise ValueError(
-                f"ResTranOCR: cnn_channels ({self.cnn_channels}) must be divisible by transformer_heads ({transformer_heads})."
-            )
-
-        self.pos_encoder = PositionalEncoding(d_model=self.cnn_channels, dropout=float(dropout))
-
+            self.backbone = ResNetFeatureExtractor(pretrained=False)
+            self.backbone_out_channels = 512 # ResNet34 output
+        
+        # Project backbone features to a common dimension (512) for Fusion/Transformer
+        self.feature_proj = nn.Conv2d(self.backbone_out_channels, 512, kernel_size=1)
+        self.cnn_channels = 512
+        
+        # 3. Attention Fusion
+        self.fusion = AttentionFusion(channels=self.cnn_channels)
+        
+        # 4. Transformer Encoder
+        self.pos_encoder = PositionalEncoding(d_model=self.cnn_channels, dropout=dropout)
+        
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.cnn_channels,
-            nhead=int(transformer_heads),
-            dim_feedforward=int(transformer_ff_dim),
-            dropout=float(dropout),
-            activation="gelu",
-            batch_first=True,
+            nhead=transformer_heads,
+            dim_feedforward=transformer_ff_dim,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=int(transformer_layers))
-
-        # 6) CTC head
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=transformer_layers)
+        
+        # 5. Prediction Head
         self.head = nn.Linear(self.cnn_channels, num_classes)
 
-        # 7) Optional SR decoder (aux task)
+        # Thêm SR Decoder nếu bật flag
         if self.aux_sr:
-            self.sr_decoder = SRDecoder(in_channels=self.cnn_channels)
+            self.sr_decoder = SRDecoder(in_channels=512)
 
-    def forward(self, x: torch.Tensor, return_sr: bool = False):
-        """
-        Args:
-            x: [B, F, 3, H, W]
-        Returns:
-            log_probs: [B, T, C]
-            (optional) sr_out, grid
-        """
+    def forward(self, x, return_sr=False):
         b, f, c, h, w = x.size()
-        assert f == self.num_frames, f"Expected {self.num_frames} frames but got {f}"
-
         x_flat = x.view(b * f, c, h, w)
-
+        
         grid = None
         if self.use_stn:
             theta = self.stn(x_flat)
@@ -159,30 +83,33 @@ class ResTranOCR(nn.Module):
             x_aligned = F.grid_sample(x_flat, grid, align_corners=False)
         else:
             x_aligned = x_flat
-
-        # Backbone features: [B*F, Cb, 1, W']
-        feat = self.backbone(x_aligned)
-
-        # Project -> [B*F, d_model, 1, W']
-        feat = self.feature_proj(feat)
-
-        # Optional SR branch (per-frame)
+        
+        # Backbone features
+        features = self.backbone(x_aligned)  # [B*F, Out_Ch, 1, W']
+        
+        # Projection if needed
+        if features.size(1) != self.cnn_channels:
+            features = self.feature_proj(features) # [B*F, 512, 1, W']
+            
+        # Nhánh SR (Chạy nếu được yêu cầu)
         sr_out = None
         if self.aux_sr and return_sr:
-            sr_out = self.sr_decoder(feat)
+            sr_out = self.sr_decoder(features)
 
-        # Fuse frames -> [B, d_model, 1, W']
-        fused = self.fusion(feat)
-
-        # Prepare for transformer: [B, d_model, 1, W'] -> [B, W', d_model]
-        seq = fused.squeeze(2).permute(0, 2, 1)
-
-        seq = self.pos_encoder(seq)
-        seq = self.transformer(seq)
-
-        logits = self.head(seq)
-        log_probs = logits.log_softmax(2)
-
+        fused = self.fusion(features)       # [B, 512, 1, W']
+        
+        # Prepare for Transformer: [B, C, 1, W'] -> [B, W', C]
+        seq_input = fused.squeeze(2).permute(0, 2, 1)
+        
+        seq_input = self.pos_encoder(seq_input)
+        seq_out = self.transformer(seq_input) 
+        
+        out = self.head(seq_out)
+        
+        log_probs = out.log_softmax(2)
+        
+        # Trả về thêm sr_out và grid để tính loss
         if return_sr:
             return log_probs, sr_out, grid
+            
         return log_probs
