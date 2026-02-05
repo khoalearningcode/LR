@@ -210,69 +210,95 @@ class Trainer:
     # Train/Val
     # ----------------------------
     def train_one_epoch(self) -> float:
+        """Train for one epoch (CTC loss in FP32 for stability)."""
         self.model.train()
         epoch_loss = 0.0
 
         save_every_steps = int(getattr(self.config, "SAVE_EVERY_STEPS", 0) or 0)
+        use_sr = bool(getattr(self.config, "AUX_SR", False))
+        sr_w = float(getattr(self.config, "SR_LOSS_W", 1.0))  # nếu chưa có thì mặc định 1.0
+        grad_clip = float(getattr(self.config, "GRAD_CLIP", 5.0))
 
         pbar = tqdm(self.train_loader, desc=f"Ep {self.current_epoch + 1}/{self.config.EPOCHS}")
         for step, (images, hr_images, targets, target_lengths, _, _) in enumerate(pbar):
-            images = images.to(self.device)
-            hr_images = hr_images.to(self.device)
-            targets = targets.to(self.device)
+            images = images.to(self.device, non_blocking=True)
+            hr_images = hr_images.to(self.device, non_blocking=True)
+            targets = targets.to(self.device, non_blocking=True)
 
             self.optimizer.zero_grad(set_to_none=True)
 
+            # -------- Forward under AMP --------
             with autocast("cuda"):
-                use_sr = getattr(self.config, "AUX_SR", False)
-
                 if use_sr:
                     preds, sr_out, grid = self.model(images, return_sr=True)
                 else:
                     preds = self.model(images)
                     sr_out, grid = None, None
 
-                # 1) CTC loss
-                preds_permuted = preds.permute(1, 0, 2)
-                input_lengths = torch.full(
-                    size=(images.size(0),),
-                    fill_value=preds.size(1),
-                    dtype=torch.long,
-                    device=targets.device,
-                )
-                loss = self.criterion(preds_permuted, targets, input_lengths, target_lengths)
-
-                # 2) SR loss (optional)
                 sr_loss = None
-                if use_sr and sr_out is not None:
+                if use_sr and (sr_out is not None):
                     b, f, c, h, w = hr_images.size()
                     hr_target = hr_images.view(b * f, c, h, w)
                     if grid is not None:
                         hr_target = torch.nn.functional.grid_sample(hr_target, grid, align_corners=False)
                     sr_loss = self.sr_criterion(sr_out, hr_target)
-                    loss = loss + sr_loss * 1.0
+            # -----------------------------------
 
+            # -------- CTC loss in FP32 (IMPORTANT) --------
+            input_lengths = torch.full(
+                size=(images.size(0),),
+                fill_value=preds.size(1),
+                dtype=torch.long,
+                device=targets.device,
+            )
+            ctc_loss = self.criterion(preds.float().permute(1, 0, 2), targets, input_lengths, target_lengths)
+            loss = ctc_loss
+            if use_sr and (sr_loss is not None) and (sr_w > 0):
+                loss = loss + sr_w * sr_loss.float()
+            # ---------------------------------------------
+
+            # Skip non-finite to avoid collapse
+            if not torch.isfinite(loss):
+                pbar.set_postfix({
+                    "loss": "nonfinite",
+                    "lr": float(self.scheduler.get_last_lr()[0]),
+                    "sc": float(self.scaler.get_scale()),
+                })
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
+
+            # Backward
             self.scaler.scale(loss).backward()
 
+            # Clip grad (log grad norm)
             self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.GRAD_CLIP)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
 
+            # Optim step (AMP-safe)
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
+            # Step scheduler only if optimizer stepped
             if self.scaler.get_scale() >= scale_before:
                 self.scheduler.step()
 
             epoch_loss += float(loss.item())
             self.global_step += 1
 
-            if use_sr and sr_loss is not None:
-                pbar.set_postfix({"loss": float(loss.item()), "sr": float(sr_loss.item()), "lr": self.scheduler.get_last_lr()[0]})
-            else:
-                pbar.set_postfix({"loss": float(loss.item()), "lr": self.scheduler.get_last_lr()[0]})
+            # Progress log
+            postfix = {
+                "loss": float(loss.item()),
+                "lr": float(self.scheduler.get_last_lr()[0]),
+                "gn": float(grad_norm),
+                "sc": float(self.scaler.get_scale()),
+            }
+            if use_sr and (sr_loss is not None):
+                postfix["ctc"] = float(ctc_loss.item())
+                postfix["sr"] = float(sr_loss.item())
+            pbar.set_postfix(postfix)
 
-            # Optional mid-epoch save (slower)
+            # Optional mid-epoch save
             if save_every_steps > 0 and (self.global_step % save_every_steps == 0):
                 try:
                     self.save_checkpoint("last")
@@ -280,6 +306,7 @@ class Trainer:
                     pass
 
         return epoch_loss / max(1, len(self.train_loader))
+
 
     def validate(self) -> Tuple[Dict[str, float], List[str]]:
         if self.val_loader is None:
@@ -303,12 +330,7 @@ class Trainer:
                     dtype=torch.long,
                     device=targets.device,
                 )
-                loss = self.criterion(
-                    preds.permute(1, 0, 2),
-                    targets,
-                    input_lengths,
-                    target_lengths,
-                )
+                loss = self.criterion(preds.float().permute(1, 0, 2), targets, input_lengths, target_lengths)
                 val_loss += float(loss.item())
 
                 decoded_list = decode_with_confidence(preds, self.idx2char)
@@ -417,4 +439,4 @@ class Trainer:
         out_path = self._get_output_path(output_filename)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(results))
-        print(f"✅ Saved {len(results)} lines to {out_path}")
+        print(f"✅ Saved {len(results)} lines to {out_path}") 
