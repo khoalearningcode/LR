@@ -80,18 +80,8 @@ class MultiFrameDataset(Dataset):
 
         print(f"[{mode.upper()}] Scanning: {root_dir}")
         abs_root = os.path.abspath(root_dir)
-        print(f"[SCAN] Searching under: {abs_root}")
-        all_tracks: List[str] = []
-        dir_count = 0
-        for root, dirs, _ in os.walk(abs_root):
-            dir_count += 1
-            if dir_count % 500 == 0:
-                print(f"[SCAN] Visited {dir_count} dirs... Found {len(all_tracks)} tracks so far.")
-            for d in dirs:
-                if d.startswith("track_"):
-                    all_tracks.append(os.path.join(root, d))
-        all_tracks = sorted(all_tracks)
-        print(f"[SCAN] Done. Visited {dir_count} dirs. Found {len(all_tracks)} tracks.")
+        search_path = os.path.join(abs_root, "**", "track_*")
+        all_tracks = sorted(glob.glob(search_path, recursive=True))
         
         if not all_tracks:
             print("❌ ERROR: No data found.")
