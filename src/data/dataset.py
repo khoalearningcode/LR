@@ -39,6 +39,7 @@ class MultiFrameDataset(Dataset):
         is_test: bool = False,
         full_train: bool = False,
         train_lr_sim_p: float = 0.0,
+        input_norm: str = "half",
     ):
         """
         Args:
@@ -65,17 +66,28 @@ class MultiFrameDataset(Dataset):
         self.is_test = is_test
         self.full_train = full_train
         self.train_lr_sim_p = train_lr_sim_p
+        self.input_norm = input_norm
         
         if mode == 'train':
             # Training: apply augmentation on the fly
             if augmentation_level == "light":
-                self.transform = get_light_transforms(img_height, img_width, lr_sim_p=self.train_lr_sim_p)
+                self.transform = get_light_transforms(
+                    img_height,
+                    img_width,
+                    lr_sim_p=self.train_lr_sim_p,
+                    input_norm=self.input_norm,
+                )
             else:
-                self.transform = get_train_transforms(img_height, img_width, lr_sim_p=self.train_lr_sim_p)
+                self.transform = get_train_transforms(
+                    img_height,
+                    img_width,
+                    lr_sim_p=self.train_lr_sim_p,
+                    input_norm=self.input_norm,
+                )
             self.degrade = get_degradation_transforms()
         else:
             # Validation or test: only resize and normalize
-            self.transform = get_val_transforms(img_height, img_width)
+            self.transform = get_val_transforms(img_height, img_width, input_norm=self.input_norm)
             self.degrade = None
 
         print(f"[{mode.upper()}] Scanning: {root_dir}")

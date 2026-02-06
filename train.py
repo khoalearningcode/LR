@@ -350,9 +350,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backbone",
         type=str,
-        choices=["convnext", "resnet", "resnet34", "resnet50", "resnet101", "resnext50", "resnext101", "wide_resnet50"],
+        choices=["convnext", "resnet", "resnet34", "resnet50", "resnet101", "resnext50", "resnext101", "wide_resnet50", "timm"],
         default=None,
-        help="Backbone for ResTran: convnext|resnet34|resnet50|resnet101|resnext50|resnext101|wide_resnet50 (alias: resnet=resnet34)",
+        help="Backbone for ResTran: convnext|resnet34|resnet50|resnet101|resnext50|resnext101|wide_resnet50|timm (alias: resnet=resnet34)",
     )
     
     parser.add_argument(
@@ -367,6 +367,25 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Stochastic depth rate for ConvNeXt blocks (0.0 ~ 0.3). Default: from config.",
+    )
+    parser.add_argument(
+        "--input-norm",
+        type=str,
+        choices=["half", "imagenet"],
+        default=None,
+        help="Input normalization scheme: half or imagenet (default: half or auto for pretrained)",
+    )
+    parser.add_argument(
+        "--timm-model",
+        type=str,
+        default=None,
+        help="timm model name when --backbone timm",
+    )
+    parser.add_argument(
+        "--timm-out-index",
+        type=int,
+        default=None,
+        help="timm feature index (out_indices) when --backbone timm",
     )
     parser.add_argument(
         "--sr-aux",
@@ -495,6 +514,13 @@ def main():
     if getattr(args, "droppath", None) is not None:
         config.DROPPATH_RATE = float(args.droppath)
 
+    if args.input_norm is not None:
+        setattr(config, "INPUT_NORM", str(args.input_norm))
+    if args.timm_model is not None:
+        setattr(config, "TIMM_MODEL", str(args.timm_model))
+    if args.timm_out_index is not None:
+        setattr(config, "TIMM_OUT_INDEX", int(args.timm_out_index))
+
     config.AUX_SR = bool(args.sr_aux)
 
     # ---- New flag overrides (safe even if Config didn't declare them) ----
@@ -509,6 +535,14 @@ def main():
         setattr(config, "FRAME_DROPOUT", float(args.frame_dropout))
     # store backbone_pretrained for model construction if supported
     setattr(config, "BACKBONE_PRETRAINED", bool(args.backbone_pretrained))
+
+    # auto input norm for pretrained (unless user provided)
+    if args.input_norm is None:
+        backbone_type = getattr(config, "BACKBONE_TYPE", "convnext")
+        if bool(getattr(config, "BACKBONE_PRETRAINED", False)) and backbone_type != "convnext":
+            setattr(config, "INPUT_NORM", "imagenet")
+        elif getattr(config, "INPUT_NORM", None) is None:
+            setattr(config, "INPUT_NORM", "half")
 
     # checkpoint frequency overrides
     if args.save_every_epochs is not None:
@@ -607,6 +641,7 @@ def main():
         "val_split_file": config.VAL_SPLIT_FILE,
         "seed": config.SEED,
         "augmentation_level": config.AUGMENTATION_LEVEL,
+        "input_norm": getattr(config, "INPUT_NORM", "half"),
     }
 
     # Optional: mild LR simulation probability for REAL LR frames (only if dataset supports it)
@@ -640,6 +675,7 @@ def main():
                 img_width=config.IMG_WIDTH,
                 char2idx=config.CHAR2IDX,
                 seed=config.SEED,
+                input_norm=getattr(config, "INPUT_NORM", "half"),
                 is_test=True,
             )
             test_loader = DataLoader(
@@ -735,6 +771,8 @@ def main():
             drop_path_rate=float(getattr(config, "DROPPATH_RATE", 0.0)),
             aux_sr=config.AUX_SR,
             cnn_channels=int(getattr(config, "CNN_CHANNELS", 512)),
+            timm_model=str(getattr(config, "TIMM_MODEL", "") or ""),
+            timm_out_index=int(getattr(config, "TIMM_OUT_INDEX", 0)),
             # optional extras (only used if your ResTranOCR __init__ supports them)
             frame_dropout=float(getattr(config, "FRAME_DROPOUT", 0.0)),
             backbone_pretrained=bool(getattr(config, "BACKBONE_PRETRAINED", False)),

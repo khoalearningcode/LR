@@ -4,7 +4,8 @@ import torch.nn.functional as F
 # Import ConvNeXtFeatureExtractor vừa thêm
 from src.models.components import (
     ResNetFeatureExtractor, 
-    ConvNeXtFeatureExtractor, 
+    ConvNeXtFeatureExtractor,
+    TimmFeatureExtractor,
     AttentionFusion, 
     PositionalEncoding, 
     STNBlock,
@@ -26,6 +27,8 @@ class ResTranOCR(nn.Module):
         use_stn: bool = True,
         backbone_type: str = "convnext",
         backbone_pretrained: bool = False,
+        timm_model: str = "",
+        timm_out_index: int = 0,
         aux_sr: bool = False,
         cnn_channels: int = 512
     ):
@@ -38,7 +41,14 @@ class ResTranOCR(nn.Module):
             self.stn = STNBlock(in_channels=3)
 
         # 2. Backbone Selection
-        if backbone_type == "convnext":
+        if backbone_type == "timm":
+            self.backbone = TimmFeatureExtractor(
+                timm_model=timm_model,
+                pretrained=bool(backbone_pretrained),
+                out_index=int(timm_out_index),
+            )
+            self.backbone_out_channels = int(self.backbone.out_channels)
+        elif backbone_type == "convnext":
             self.backbone = ConvNeXtFeatureExtractor()
             # try infer out_channels if implemented, else fall back to 768 (ConvNeXt Tiny)
             self.backbone_out_channels = int(getattr(self.backbone, "out_channels", 768))

@@ -317,6 +317,38 @@ class ResNetFeatureExtractor(nn.Module):
         return x
 
 
+class TimmFeatureExtractor(nn.Module):
+    """
+    Generic backbone from timm with features_only=True.
+    Returns feature map as [B, C, 1, W] by pooling height -> 1.
+    """
+    def __init__(self, timm_model: str, pretrained: bool = True, out_index: int = 0):
+        super().__init__()
+        try:
+            import timm
+        except Exception as e:
+            raise ImportError("Please install timm: pip install timm") from e
+
+        self.timm_model = timm_model
+        self.out_index = int(out_index)
+
+        self.model = timm.create_model(
+            timm_model,
+            pretrained=bool(pretrained),
+            features_only=True,
+            out_indices=(self.out_index,),
+        )
+        ch = self.model.feature_info.channels()[0]
+        self.out_channels = int(ch)
+
+    def forward(self, x):
+        feats = self.model(x)
+        x = feats[0]
+        if x.shape[2] != 1:
+            x = x.mean(dim=2, keepdim=True)
+        return x
+
+
 class PositionalEncoding(nn.Module):
     """
     Injects information about the relative or absolute position of the tokens in the sequence.
