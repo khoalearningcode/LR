@@ -26,7 +26,8 @@ class ResTranOCR(nn.Module):
         use_stn: bool = True,
         backbone_type: str = "convnext",
         backbone_pretrained: bool = False,
-        aux_sr: bool = False  # Thêm tham số này
+        aux_sr: bool = False,
+        cnn_channels: int = 512
     ):
         super().__init__()
         self.use_stn = use_stn
@@ -50,9 +51,9 @@ class ResTranOCR(nn.Module):
             self.backbone_out_channels = int(getattr(self.backbone, "out_channels", 512))
 
         
-        # Project backbone features to a common dimension (512) for Fusion/Transformer
-        self.feature_proj = nn.Conv2d(self.backbone_out_channels, 512, kernel_size=1)
-        self.cnn_channels = 512
+        # Project backbone features to a common dimension for Fusion/Transformer
+        self.cnn_channels = int(cnn_channels)
+        self.feature_proj = nn.Conv2d(self.backbone_out_channels, self.cnn_channels, kernel_size=1)
         
         # 3. Attention Fusion
         self.fusion = AttentionFusion(channels=self.cnn_channels)
@@ -75,7 +76,7 @@ class ResTranOCR(nn.Module):
 
         # Thêm SR Decoder nếu bật flag
         if self.aux_sr:
-            self.sr_decoder = SRDecoder(in_channels=512)
+            self.sr_decoder = SRDecoder(in_channels=self.cnn_channels)
 
     def forward(self, x, return_sr=False):
         b, f, c, h, w = x.size()

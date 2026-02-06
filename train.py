@@ -266,6 +266,10 @@ def parse_args() -> argparse.Namespace:
         help="Number of transformer encoder layers (default: from config)"
     )
     parser.add_argument(
+        "--cnn-channels", type=int, default=None,
+        help="d_model after backbone projection (512 or 768). Must be divisible by transformer-heads."
+    )
+    parser.add_argument(
         "--aug-level",
         type=str,
         choices=["full", "light"],
@@ -483,6 +487,8 @@ def main():
         config.USE_STN = False
     if args.backbone is not None:
         config.BACKBONE_TYPE = args.backbone
+    if args.cnn_channels is not None:
+        setattr(config, "CNN_CHANNELS", int(args.cnn_channels))
 
     if getattr(args, "backbone_variant", None):
         config.BACKBONE_VARIANT = args.backbone_variant
@@ -701,6 +707,12 @@ def main():
 
     # Initialize model based on config
 
+    # Validate CNN_CHANNELS vs TRANSFORMER_HEADS
+    cnn_channels = int(getattr(config, "CNN_CHANNELS", 512))
+    heads = int(getattr(config, "TRANSFORMER_HEADS", 8))
+    if cnn_channels % heads != 0:
+        raise ValueError(f"CNN_CHANNELS({cnn_channels}) must be divisible by TRANSFORMER_HEADS({heads})")
+
     # Helper: pass only kwargs supported by the target callable (keeps backward compatibility)
     def _filter_kwargs(callable_obj, kwargs: dict) -> dict:
         try:
@@ -722,6 +734,7 @@ def main():
             backbone_variant=getattr(config, "BACKBONE_VARIANT", "tiny"),
             drop_path_rate=float(getattr(config, "DROPPATH_RATE", 0.0)),
             aux_sr=config.AUX_SR,
+            cnn_channels=int(getattr(config, "CNN_CHANNELS", 512)),
             # optional extras (only used if your ResTranOCR __init__ supports them)
             frame_dropout=float(getattr(config, "FRAME_DROPOUT", 0.0)),
             backbone_pretrained=bool(getattr(config, "BACKBONE_PRETRAINED", False)),
