@@ -77,5 +77,25 @@ python train.py -m restran --backbone timm --timm-model convnextv2_tiny --timm-o
     <td style="border: 1px solid white;">—</td>
     <td style="border: 1px solid white;">—</td>
   </tr>
+  <tr>
+    <td style="border: 1px solid white;">TIMM_CXv2T_fcmae22kIn1k_o0_w192</td>
+    <td style="border: 1px solid white;">
+
+```bash
+python train.py -m restran --backbone timm \
+  --timm-model convnextv2_tiny.fcmae_ft_in22k_in1k --timm-out-index 0 \
+  --backbone-pretrained --input-norm imagenet \
+  --aug-level full --epochs 30 \
+  --img-width 192 --train-lr-sim-p 0.35 --frame-dropout 0.20 \
+  --lr 1.5e-4 \
+  --run-tag TIMM_CXv2T_fcmae22kIn1k_o0_w192 \
+  --batch-size 32 --save-every-steps 200 --overwrite
+```
+
+</td>
+    <td style="border: 1px solid white;">76.68%</td>
+    <td style="border: 1px solid white;">—</td>
+    <td style="border: 1px solid white;">—</td>
+  </tr>
 </tbody>
 </table>
