@@ -25,8 +25,7 @@ class ResTranOCR(nn.Module):
         dropout: float = 0.1,
         use_stn: bool = True,
         backbone_type: str = "convnext",
-        backbone_variant: str = "tiny",
-        drop_path_rate: float = 0.0,
+        backbone_pretrained: bool = False,
         aux_sr: bool = False  # Thêm tham số này
     ):
         super().__init__()
@@ -35,16 +34,24 @@ class ResTranOCR(nn.Module):
         
         # 1. Spatial Transformer Network
         if self.use_stn:
-            self.stn = STNBlock(in_channels=3)
+            self.stn = STNBlock(in_channels=3)        # 2. Backbone Selection
+        bt = (backbone_type or "convnext").lower()
 
-        # 2. Backbone Selection
-        if backbone_type == "convnext":
-            self.backbone = ConvNeXtFeatureExtractor(variant=backbone_variant, drop_path_rate=drop_path_rate)
-            self.backbone_out_channels = int(getattr(self.backbone, "out_channels", 768))  # from variant
+        if bt == "convnext":
+            self.backbone = ConvNeXtFeatureExtractor()
+            self.backbone_out_channels = 768  # ConvNeXt custom output
         else:
-            self.backbone = ResNetFeatureExtractor(pretrained=False)
-            self.backbone_out_channels = 512 # ResNet34 output
-        
+            # ResNet-family (pretrained optional)
+            # Supported: resnet34/resnet50/resnet101/resnext50/resnext101/wide_resnet50
+            arch = bt
+            if arch == "resnet":
+                arch = "resnet34"
+            elif arch == "resnext":
+                arch = "resnext50_32x4d"
+
+            self.backbone = ResNetFeatureExtractor(arch=arch, pretrained=backbone_pretrained)
+            self.backbone_out_channels = getattr(self.backbone, "out_channels", 512)
+
         # Project backbone features to a common dimension (512) for Fusion/Transformer
         self.feature_proj = nn.Conv2d(self.backbone_out_channels, 512, kernel_size=1)
         self.cnn_channels = 512

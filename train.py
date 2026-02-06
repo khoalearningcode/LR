@@ -346,9 +346,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backbone",
         type=str,
-        choices=["resnet", "convnext"],
+        choices=["convnext", "resnet", "resnet34", "resnet50", "resnet101", "resnext50", "resnext101", "wide_resnet50"],
         default=None,
-        help="Backbone architecture for ResTran: 'resnet' or 'convnext'",
+        help="Backbone for ResTran: convnext|resnet34|resnet50|resnet101|resnext50|resnext101|wide_resnet50 (alias: resnet=resnet34)",
     )
     
     parser.add_argument(

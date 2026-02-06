@@ -1,26 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import ResNet34_Weights, resnet34
+from torchvision.models import (
+    ResNet34_Weights, resnet34,
+    ResNet50_Weights, resnet50,
+    ResNet101_Weights, resnet101,
+    ResNeXt50_32X4D_Weights, resnext50_32x4d,
+    ResNeXt101_32X8D_Weights, resnext101_32x8d,
+    Wide_ResNet50_2_Weights, wide_resnet50_2,
+)
 import math
-
-
-
-class DropPath(nn.Module):
-    """Stochastic Depth per sample (when applied in main path of residual blocks)."""
-    def __init__(self, drop_prob: float = 0.0):
-        super().__init__()
-        self.drop_prob = float(drop_prob)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.drop_prob == 0.0 or (not self.training):
-            return x
-        keep_prob = 1.0 - self.drop_prob
-        # Work with broadcastable random tensor, shape [B, 1, 1, 1]
-        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
-        binary_tensor = torch.floor(random_tensor)
-        return x.div(keep_prob) * binary_tensor
 
 class LayerNorm2d(nn.Module):
     """LayerNorm that supports [N, C, H, W] inputs."""
@@ -50,7 +39,7 @@ class ConvNeXtBlock(nn.Module):
         self.pwconv2 = nn.Linear(4 * dim, dim)
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)), 
                                     requires_grad=True) if layer_scale_init_value > 0 else None
-        self.drop_path = DropPath(drop_path)  # stochastic depth
+        self.drop_path = nn.Identity()  # Placeholder, can add DropPath if needed
 
     def forward(self, x):
         input = x
@@ -74,27 +63,8 @@ class ConvNeXtFeatureExtractor(nn.Module):
     Input: [N, 3, 32, 128]
     Output: [N, dims[-1], 1, 32] (Sequence length ~32)
     """
-    def __init__(self, variant: str = 'tiny', depths=None, dims=None, drop_path_rate: float = 0.0):
+    def __init__(self, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]):
         super().__init__()
-        # Presets follow official ConvNeXt (depths, dims)
-        preset_table = {
-            "tiny":  ([3, 3, 9, 3],  [96, 192, 384, 768]),
-            "small": ([3, 3, 27, 3], [96, 192, 384, 768]),
-            "base":  ([3, 3, 27, 3], [128, 256, 512, 1024]),
-        }
-        if depths is None or dims is None:
-            if variant not in preset_table:
-                raise ValueError(f"Unknown ConvNeXt variant: {variant}. Choose from {list(preset_table.keys())}")
-            depths, dims = preset_table[variant]
-        self.variant = variant
-        self.depths = list(depths)
-        self.dims = list(dims)
-        self.out_channels = int(self.dims[-1])
-
-        # Stochastic depth schedule
-        total_blocks = sum(self.depths)
-        dp_rates = torch.linspace(0.0, float(drop_path_rate), total_blocks).tolist() if total_blocks > 0 else []
-
         self.downsample_layers = nn.ModuleList()
         
         # Stem: 2x2 stride 2 (Not 4 to preserve details for LR images)
@@ -130,14 +100,11 @@ class ConvNeXtFeatureExtractor(nn.Module):
         self.downsample_layers.append(downsample_layer3)
 
         self.stages = nn.ModuleList()
-        dp_ptr = 0
         for i in range(4):
-            blocks = []
-            for _ in range(self.depths[i]):
-                dp = dp_rates[dp_ptr] if dp_ptr < len(dp_rates) else 0.0
-                blocks.append(ConvNeXtBlock(dim=dims[i], drop_path=dp))
-                dp_ptr += 1
-            self.stages.append(nn.Sequential(*blocks))
+            stage = nn.Sequential(
+                *[ConvNeXtBlock(dim=dims[i]) for _ in range(depths[i])]
+            )
+            self.stages.append(stage)
 
         self.final_norm = LayerNorm2d(dims[-1], eps=1e-6)
         
@@ -202,11 +169,9 @@ class AttentionFusion(nn.Module):
     """
     Attention-based fusion module for combining multi-frame features.
     Computes a weighted sum of features from multiple frames based on their 'quality' scores.
-    Supports frame dropout during training for regularization.
     """
-    def __init__(self, channels: int, frame_dropout: float = 0.0):
+    def __init__(self, channels: int):
         super().__init__()
-        self.frame_dropout = float(frame_dropout)
         # A small CNN to predict attention scores (quality map) from features
         self.score_net = nn.Sequential(
             nn.Conv2d(channels, channels // 8, kernel_size=1),
@@ -230,13 +195,6 @@ class AttentionFusion(nn.Module):
         
         # Calculate attention scores: [Batch, Frames, 1, H, W]
         scores = self.score_net(x).view(batch_size, num_frames, 1, h, w)
-        
-        # NEW: frame dropout (training only)
-        if self.training and self.frame_dropout > 0:
-            drop_mask = (torch.rand(batch_size, num_frames, 1, 1, 1, device=scores.device)
-                         < self.frame_dropout)
-            scores = scores.masked_fill(drop_mask, -1e4)
-        
         weights = F.softmax(scores, dim=1)  # Normalize scores across frames
 
         # Weighted sum fusion
@@ -269,44 +227,77 @@ class CNNBackbone(nn.Module):
 
 
 class ResNetFeatureExtractor(nn.Module):
+    """ResNet-family backbones customized for OCR (preserve width, collapse height).
+
+    Supported arch values:
+      - resnet34, resnet50, resnet101
+      - resnext50_32x4d, resnext101_32x8d
+      - wide_resnet50_2
     """
-    ResNet-based backbone customized for OCR.
-    Uses ResNet34 with modified strides to preserve width (sequence length) while reducing height.
-    """
-    def __init__(self, pretrained: bool = False):
+    def __init__(self, arch: str = "resnet34", pretrained: bool = False):
         super().__init__()
-        
-        # Load ResNet34 from torchvision
-        weights = ResNet34_Weights.DEFAULT if pretrained else None
-        resnet = resnet34(weights=weights)
+
+        arch = arch.lower()
+        if arch == "resnet34":
+            weights = ResNet34_Weights.DEFAULT if pretrained else None
+            net = resnet34(weights=weights)
+            out_ch = 512
+        elif arch == "resnet50":
+            weights = ResNet50_Weights.DEFAULT if pretrained else None
+            net = resnet50(weights=weights)
+            out_ch = 2048
+        elif arch == "resnet101":
+            weights = ResNet101_Weights.DEFAULT if pretrained else None
+            net = resnet101(weights=weights)
+            out_ch = 2048
+        elif arch in ("resnext50", "resnext50_32x4d"):
+            weights = ResNeXt50_32X4D_Weights.DEFAULT if pretrained else None
+            net = resnext50_32x4d(weights=weights)
+            out_ch = 2048
+        elif arch in ("resnext101", "resnext101_32x8d"):
+            weights = ResNeXt101_32X8D_Weights.DEFAULT if pretrained else None
+            net = resnext101_32x8d(weights=weights)
+            out_ch = 2048
+        elif arch in ("wide_resnet50", "wide_resnet50_2"):
+            weights = Wide_ResNet50_2_Weights.DEFAULT if pretrained else None
+            net = wide_resnet50_2(weights=weights)
+            out_ch = 2048
+        else:
+            raise ValueError(f"Unsupported ResNetFeatureExtractor arch: {arch}")
+
+        self.out_channels = out_ch
 
         # --- OCR Customization ---
-        # We need to keep the standard first layer (stride 2)
-        self.conv1 = resnet.conv1
-        self.bn1 = resnet.bn1
-        self.relu = resnet.relu
-        self.maxpool = resnet.maxpool
+        # Keep width longer: modify layer3/layer4 strides to (2,1)
+        # Works for ResNet/ResNeXt/WideResNet (same layer naming)
+        self.conv1 = net.conv1
+        self.bn1 = net.bn1
+        self.relu = net.relu
+        self.maxpool = net.maxpool
 
-        self.layer1 = resnet.layer1
-        self.layer2 = resnet.layer2
-        self.layer3 = resnet.layer3
-        self.layer4 = resnet.layer4
+        self.layer1 = net.layer1
+        self.layer2 = net.layer2
+        self.layer3 = net.layer3
+        self.layer4 = net.layer4
 
-        # Modify strides in layer3 and layer4 to (2, 1)
-        # This reduces height but preserves width for sequence modeling
-        self.layer3[0].conv1.stride = (2, 1)
-        self.layer3[0].downsample[0].stride = (2, 1)
-        
-        self.layer4[0].conv1.stride = (2, 1)
-        self.layer4[0].downsample[0].stride = (2, 1)
+        # Modify the first block stride in layer3 and layer4 to preserve width
+        # layer3: stride (2,2) -> (2,1)
+        if hasattr(self.layer3[0], "conv1"):
+            self.layer3[0].conv1.stride = (2, 1)
+        if hasattr(self.layer3[0], "downsample") and self.layer3[0].downsample is not None:
+            self.layer3[0].downsample[0].stride = (2, 1)
+
+        # layer4: stride (2,2) -> (2,1)
+        if hasattr(self.layer4[0], "conv1"):
+            self.layer4[0].conv1.stride = (2, 1)
+        if hasattr(self.layer4[0], "downsample") and self.layer4[0].downsample is not None:
+            self.layer4[0].downsample[0].stride = (2, 1)
+
+        # Ensure final height becomes 1 (keep width)
+        self.final_pool = nn.AdaptiveAvgPool2d((1, None))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Input images [Batch, 3, H, W]
-        Returns:
-            Features [Batch, 512, H // 16, W // 2] (approx)
-        """
+        """Return features as [B, C, 1, W']"""
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -316,13 +307,9 @@ class ResNetFeatureExtractor(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        
-        # Ensure height is 1 for sequence modeling (Height collapsing)
-        # Output shape: [Batch, 512, 1, W']
-        x = F.adaptive_avg_pool2d(x, (1, None))
+
+        x = self.final_pool(x)
         return x
-
-
 class PositionalEncoding(nn.Module):
     """
     Injects information about the relative or absolute position of the tokens in the sequence.

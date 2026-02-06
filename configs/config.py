@@ -36,7 +36,8 @@ class Config:
     GRAD_CLIP: float = 5.0
     SPLIT_RATIO: float = 0.9
     USE_CUDNN_BENCHMARK: bool = False
-    BACKBONE_TYPE: str = "convnext" 
+    BACKBONE_TYPE: str = "convnext"
+    BACKBONE_PRETRAINED: bool = False
     AUX_SR: bool = False  # Use auxiliary super-resolution task 
     
     # CRNN model hyperparameters
@@ -51,12 +52,6 @@ class Config:
     
     DEVICE: torch.device = field(default_factory=lambda: torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     OUTPUT_DIR: str = "results"
-
-    # Checkpointing / resume
-    CKPT_DIRNAME: str = "checkpoints"  # subfolder inside OUTPUT_DIR
-    SAVE_EVERY_EPOCHS: int = 1           # save last checkpoint every N epochs
-    SAVE_EVERY_STEPS: int = 0            # if >0, also save every N train steps (slower)
-    KEEP_LAST_K: int = 2                 # keep last K periodic checkpoints (optional)
     
     # Derived attributes (computed in __post_init__)
     CHAR2IDX: Dict[str, int] = field(default_factory=dict, init=False)
