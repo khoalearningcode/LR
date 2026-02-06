@@ -1,14 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import (
-    ResNet34_Weights, resnet34,
-    ResNet50_Weights, resnet50,
-    ResNet101_Weights, resnet101,
-    ResNeXt50_32X4D_Weights, resnext50_32x4d,
-    ResNeXt101_32X8D_Weights, resnext101_32x8d,
-    Wide_ResNet50_2_Weights, wide_resnet50_2,
-)
+from torchvision import models as tvm
 import math
 
 class LayerNorm2d(nn.Module):
@@ -227,77 +220,88 @@ class CNNBackbone(nn.Module):
 
 
 class ResNetFeatureExtractor(nn.Module):
-    """ResNet-family backbones customized for OCR (preserve width, collapse height).
-
-    Supported arch values:
-      - resnet34, resnet50, resnet101
-      - resnext50_32x4d, resnext101_32x8d
-      - wide_resnet50_2
+    """
+    Torchvision ResNet/ResNeXt/WideResNet backbone customized for OCR.
+    - Preserves width by changing the first stride-2 blocks in layer3 and layer4 to stride (2,1).
+    - Collapses height to 1 with adaptive pooling.
+    Supported arch names:
+      resnet34, resnet50, resnet101, resnext50, resnext101, wide_resnet50
     """
     def __init__(self, arch: str = "resnet34", pretrained: bool = False):
         super().__init__()
+        arch = (arch or "resnet34").lower()
 
-        arch = arch.lower()
-        if arch == "resnet34":
-            weights = ResNet34_Weights.DEFAULT if pretrained else None
-            net = resnet34(weights=weights)
-            out_ch = 512
-        elif arch == "resnet50":
-            weights = ResNet50_Weights.DEFAULT if pretrained else None
-            net = resnet50(weights=weights)
-            out_ch = 2048
-        elif arch == "resnet101":
-            weights = ResNet101_Weights.DEFAULT if pretrained else None
-            net = resnet101(weights=weights)
-            out_ch = 2048
-        elif arch in ("resnext50", "resnext50_32x4d"):
-            weights = ResNeXt50_32X4D_Weights.DEFAULT if pretrained else None
-            net = resnext50_32x4d(weights=weights)
-            out_ch = 2048
-        elif arch in ("resnext101", "resnext101_32x8d"):
-            weights = ResNeXt101_32X8D_Weights.DEFAULT if pretrained else None
-            net = resnext101_32x8d(weights=weights)
-            out_ch = 2048
-        elif arch in ("wide_resnet50", "wide_resnet50_2"):
-            weights = Wide_ResNet50_2_Weights.DEFAULT if pretrained else None
-            net = wide_resnet50_2(weights=weights)
-            out_ch = 2048
-        else:
-            raise ValueError(f"Unsupported ResNetFeatureExtractor arch: {arch}")
+        # Build torchvision model with best-effort weight loading across torchvision versions
+        def _get_weights(name: str):
+            if not pretrained:
+                return None
+            # Newer torchvision uses enum weights, older uses pretrained=True
+            try:
+                w = tvm.get_model_weights(name).DEFAULT
+                return w
+            except Exception:
+                return "DEFAULT"
 
-        self.out_channels = out_ch
+        # Map our short names to torchvision model names / constructors
+        name_map = {
+            "resnet34": "resnet34",
+            "resnet50": "resnet50",
+            "resnet101": "resnet101",
+            "resnext50": "resnext50_32x4d",
+            "resnext101": "resnext101_32x8d",
+            "wide_resnet50": "wide_resnet50_2",
+        }
+        if arch not in name_map:
+            raise ValueError(f"Unsupported arch: {arch}. Choose from {list(name_map.keys())}")
 
-        # --- OCR Customization ---
-        # Keep width longer: modify layer3/layer4 strides to (2,1)
-        # Works for ResNet/ResNeXt/WideResNet (same layer naming)
-        self.conv1 = net.conv1
-        self.bn1 = net.bn1
-        self.relu = net.relu
-        self.maxpool = net.maxpool
+        tv_name = name_map[arch]
 
-        self.layer1 = net.layer1
-        self.layer2 = net.layer2
-        self.layer3 = net.layer3
-        self.layer4 = net.layer4
+        model = None
+        try:
+            # torchvision >= 0.15
+            model = tvm.get_model(tv_name, weights=_get_weights(tv_name))
+        except Exception:
+            # fallback: direct constructors
+            ctor = getattr(tvm, tv_name)
+            try:
+                model = ctor(weights=_get_weights(tv_name))
+            except TypeError:
+                model = ctor(pretrained=bool(pretrained))
 
-        # Modify the first block stride in layer3 and layer4 to preserve width
-        # layer3: stride (2,2) -> (2,1)
-        if hasattr(self.layer3[0], "conv1"):
-            self.layer3[0].conv1.stride = (2, 1)
-        if hasattr(self.layer3[0], "downsample") and self.layer3[0].downsample is not None:
-            self.layer3[0].downsample[0].stride = (2, 1)
+        # Stem / stages
+        self.conv1 = model.conv1
+        self.bn1 = model.bn1
+        self.relu = model.relu
+        self.maxpool = model.maxpool
+        self.layer1 = model.layer1
+        self.layer2 = model.layer2
+        self.layer3 = model.layer3
+        self.layer4 = model.layer4
 
-        # layer4: stride (2,2) -> (2,1)
-        if hasattr(self.layer4[0], "conv1"):
-            self.layer4[0].conv1.stride = (2, 1)
-        if hasattr(self.layer4[0], "downsample") and self.layer4[0].downsample is not None:
-            self.layer4[0].downsample[0].stride = (2, 1)
+        # Infer output channels
+        self.out_channels = int(getattr(model.fc, "in_features", 512))
 
-        # Ensure final height becomes 1 (keep width)
-        self.final_pool = nn.AdaptiveAvgPool2d((1, None))
+        # ---- OCR stride customization ----
+        # For BasicBlock: stride is in conv1
+        # For Bottleneck: stride is in conv2
+        def _set_stride(block, stride_hw):
+            # Torchvision blocks:
+            # - BasicBlock: has conv1/conv2, no conv3, stride is applied in conv1
+            # - Bottleneck: has conv1/conv2/conv3, stride is applied in conv2
+            if hasattr(block, "conv3"):
+                # Bottleneck
+                block.conv2.stride = stride_hw
+            else:
+                # BasicBlock
+                block.conv1.stride = stride_hw
+            if block.downsample is not None:
+                block.downsample[0].stride = stride_hw
+
+        # Change the first block of layer3 and layer4 from stride (2,2) -> (2,1)
+        _set_stride(self.layer3[0], (2, 1))
+        _set_stride(self.layer4[0], (2, 1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return features as [B, C, 1, W']"""
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -308,8 +312,11 @@ class ResNetFeatureExtractor(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        x = self.final_pool(x)
+        # [B, C, H', W'] -> [B, C, 1, W'] for sequence modeling
+        x = F.adaptive_avg_pool2d(x, (1, None))
         return x
+
+
 class PositionalEncoding(nn.Module):
     """
     Injects information about the relative or absolute position of the tokens in the sequence.

@@ -34,24 +34,22 @@ class ResTranOCR(nn.Module):
         
         # 1. Spatial Transformer Network
         if self.use_stn:
-            self.stn = STNBlock(in_channels=3)        # 2. Backbone Selection
-        bt = (backbone_type or "convnext").lower()
+            self.stn = STNBlock(in_channels=3)
 
-        if bt == "convnext":
+        # 2. Backbone Selection
+        if backbone_type == "convnext":
             self.backbone = ConvNeXtFeatureExtractor()
-            self.backbone_out_channels = 768  # ConvNeXt custom output
+            # try infer out_channels if implemented, else fall back to 768 (ConvNeXt Tiny)
+            self.backbone_out_channels = int(getattr(self.backbone, "out_channels", 768))
         else:
-            # ResNet-family (pretrained optional)
-            # Supported: resnet34/resnet50/resnet101/resnext50/resnext101/wide_resnet50
-            arch = bt
+            # torchvision resnet/resnext variants: resnet34/resnet50/resnet101/resnext50/resnext101/wide_resnet50
+            arch = backbone_type
             if arch == "resnet":
                 arch = "resnet34"
-            elif arch == "resnext":
-                arch = "resnext50_32x4d"
+            self.backbone = ResNetFeatureExtractor(arch=arch, pretrained=bool(backbone_pretrained))
+            self.backbone_out_channels = int(getattr(self.backbone, "out_channels", 512))
 
-            self.backbone = ResNetFeatureExtractor(arch=arch, pretrained=backbone_pretrained)
-            self.backbone_out_channels = getattr(self.backbone, "out_channels", 512)
-
+        
         # Project backbone features to a common dimension (512) for Fusion/Transformer
         self.feature_proj = nn.Conv2d(self.backbone_out_channels, 512, kernel_size=1)
         self.cnn_channels = 512
