@@ -265,9 +265,39 @@ def parse_args() -> argparse.Namespace:
         "--transformer-layers", type=int, default=None,
         help="Number of transformer encoder layers (default: from config)"
     )
+
+    parser.add_argument(
+        "--transformer-ff-dim", type=int, default=None,
+        help="Transformer FFN dimension (ResTran) (default: from config)"
+    )
+    parser.add_argument(
+        "--transformer-dropout", type=float, default=None,
+        help="Transformer dropout (ResTran) (default: from config)"
+    )
     parser.add_argument(
         "--cnn-channels", type=int, default=None,
-        help="d_model after backbone projection (512 or 768). Must be divisible by transformer-heads."
+        help="Embedding width / d_model after backbone (512 or 768 recommended) (default: from config)"
+    )
+    parser.add_argument(
+        "--drop-path-rate", type=float, default=None,
+        help="ConvNeXt stochastic depth rate (0.0~0.2) (default: from config)"
+    )
+    parser.add_argument(
+        "--fusion",
+        type=str,
+        choices=["attn", "temporal"],
+        default=None,
+        help="Multi-frame fusion type: attn | temporal (default: from config)",
+    )
+    parser.add_argument("--temporal-heads", type=int, default=None, help="Temporal fusion transformer heads (default: from config)")
+    parser.add_argument("--temporal-layers", type=int, default=None, help="Temporal fusion transformer layers (default: from config)")
+    parser.add_argument("--temporal-ff-dim", type=int, default=None, help="Temporal fusion transformer FF dim (default: from config)")
+    parser.add_argument("--temporal-dropout", type=float, default=None, help="Temporal fusion transformer dropout (default: from config)")
+    parser.add_argument(
+        "--grad-accum-steps",
+        type=int,
+        default=None,
+        help="Gradient accumulation steps (>=1). Effective batch = batch_size * grad_accum_steps.",
     )
     parser.add_argument(
         "--aug-level",
@@ -350,49 +380,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backbone",
         type=str,
-        choices=["convnext", "resnet", "resnet34", "resnet50", "resnet101", "resnext50", "resnext101", "wide_resnet50", "timm"],
+        choices=["resnet", "convnext", "convnext_tiny", "convnext_mid", "convnext_small", "convnext_base"],
         default=None,
-        help="Backbone for ResTran: convnext|resnet34|resnet50|resnet101|resnext50|resnext101|wide_resnet50|timm (alias: resnet=resnet34)",
-    )
-    
-    parser.add_argument(
-        "--backbone-variant",
-        type=str,
-        choices=["tiny", "small", "base"],
-        default=None,
-        help="ConvNeXt variant when --backbone=convnext (tiny|small|base). Default: from config.",
-    )
-    parser.add_argument(
-        "--droppath",
-        type=float,
-        default=None,
-        help="Stochastic depth rate for ConvNeXt blocks (0.0 ~ 0.3). Default: from config.",
-    )
-    parser.add_argument(
-        "--input-norm",
-        type=str,
-        choices=["half", "imagenet"],
-        default=None,
-        help="Input normalization scheme: half or imagenet (default: half or auto for pretrained)",
-    )
-    parser.add_argument(
-        "--input-color",
-        type=str,
-        choices=["bgr", "rgb"],
-        default=None,
-        help="Input color order for cv2-loaded images: bgr or rgb (default: bgr or auto for pretrained)",
-    )
-    parser.add_argument(
-        "--timm-model",
-        type=str,
-        default=None,
-        help="timm model name when --backbone timm",
-    )
-    parser.add_argument(
-        "--timm-out-index",
-        type=int,
-        default=None,
-        help="timm feature index (out_indices) when --backbone timm",
+        help="Backbone architecture for ResTran: 'resnet' or 'convnext'",
     )
     parser.add_argument(
         "--sr-aux",
@@ -499,6 +489,16 @@ def main():
         "hidden_size": "HIDDEN_SIZE",
         "transformer_heads": "TRANSFORMER_HEADS",
         "transformer_layers": "TRANSFORMER_LAYERS",
+        "transformer_ff_dim": "TRANSFORMER_FF_DIM",
+        "transformer_dropout": "TRANSFORMER_DROPOUT",
+        "cnn_channels": "CNN_CHANNELS",
+        "drop_path_rate": "DROPPATH_RATE",
+        "fusion": "FUSION_TYPE",
+        "temporal_heads": "TEMPORAL_HEADS",
+        "temporal_layers": "TEMPORAL_LAYERS",
+        "temporal_ff_dim": "TEMPORAL_FF_DIM",
+        "temporal_dropout": "TEMPORAL_DROPOUT",
+        "grad_accum_steps": "GRAD_ACCUM_STEPS",
         "img_height": "IMG_HEIGHT",
         "img_width": "IMG_WIDTH",
     }
@@ -513,23 +513,6 @@ def main():
         config.USE_STN = False
     if args.backbone is not None:
         config.BACKBONE_TYPE = args.backbone
-    if args.cnn_channels is not None:
-        setattr(config, "CNN_CHANNELS", int(args.cnn_channels))
-
-    if getattr(args, "backbone_variant", None):
-        config.BACKBONE_VARIANT = args.backbone_variant
-    if getattr(args, "droppath", None) is not None:
-        config.DROPPATH_RATE = float(args.droppath)
-
-    if args.input_norm is not None:
-        setattr(config, "INPUT_NORM", str(args.input_norm))
-    if args.input_color is not None:
-        setattr(config, "INPUT_COLOR", str(args.input_color))
-    if args.timm_model is not None:
-        setattr(config, "TIMM_MODEL", str(args.timm_model))
-    if args.timm_out_index is not None:
-        setattr(config, "TIMM_OUT_INDEX", int(args.timm_out_index))
-
     config.AUX_SR = bool(args.sr_aux)
 
     # ---- New flag overrides (safe even if Config didn't declare them) ----
@@ -544,22 +527,6 @@ def main():
         setattr(config, "FRAME_DROPOUT", float(args.frame_dropout))
     # store backbone_pretrained for model construction if supported
     setattr(config, "BACKBONE_PRETRAINED", bool(args.backbone_pretrained))
-
-    # auto input norm / color for pretrained (unless user provided)
-    backbone_type = getattr(config, "BACKBONE_TYPE", "convnext")
-    use_pretrained = bool(getattr(config, "BACKBONE_PRETRAINED", False))
-
-    if args.input_norm is None:
-        if use_pretrained:
-            setattr(config, "INPUT_NORM", "imagenet")
-        elif getattr(config, "INPUT_NORM", None) is None:
-            setattr(config, "INPUT_NORM", "half")
-
-    if args.input_color is None:
-        if use_pretrained and backbone_type in {"timm", "resnet", "resnet34", "resnet50", "resnet101", "resnext50", "resnext101", "wide_resnet50"}:
-            setattr(config, "INPUT_COLOR", "rgb")
-        elif getattr(config, "INPUT_COLOR", None) is None:
-            setattr(config, "INPUT_COLOR", "bgr")
 
     # checkpoint frequency overrides
     if args.save_every_epochs is not None:
@@ -632,6 +599,10 @@ def main():
     print(f"   EXPERIMENT     : {exp_name}")
     print(f"   MODEL          : {config.MODEL_TYPE}")
     print(f"   BACKBONE       : {getattr(config, 'BACKBONE_TYPE', None)}")
+    print(f"   CNN_CHANNELS   : {getattr(config, 'CNN_CHANNELS', None)}")
+    print(f"   FUSION         : {getattr(config, 'FUSION_TYPE', None)} | FD={getattr(config, 'FRAME_DROPOUT', None)}")
+    print(f"   DROPPATH       : {getattr(config, 'DROPPATH_RATE', None)}")
+    print(f"   GRAD_ACCUM     : {getattr(config, 'GRAD_ACCUM_STEPS', 1)}")
     print(f"   USE_STN        : {config.USE_STN}")
     print(f"   DATA_ROOT      : {config.DATA_ROOT}")
     print(f"   EPOCHS(total)  : {config.EPOCHS}")
@@ -658,8 +629,6 @@ def main():
         "val_split_file": config.VAL_SPLIT_FILE,
         "seed": config.SEED,
         "augmentation_level": config.AUGMENTATION_LEVEL,
-        "input_norm": getattr(config, "INPUT_NORM", "half"),
-        "input_color": getattr(config, "INPUT_COLOR", "bgr"),
     }
 
     # Optional: mild LR simulation probability for REAL LR frames (only if dataset supports it)
@@ -691,10 +660,9 @@ def main():
                 mode="val",
                 img_height=config.IMG_HEIGHT,
                 img_width=config.IMG_WIDTH,
+        input_norm=getattr(config,'INPUT_NORM','none'),
                 char2idx=config.CHAR2IDX,
                 seed=config.SEED,
-                input_norm=getattr(config, "INPUT_NORM", "half"),
-                input_color=getattr(config, "INPUT_COLOR", "bgr"),
                 is_test=True,
             )
             test_loader = DataLoader(
@@ -762,12 +730,6 @@ def main():
 
     # Initialize model based on config
 
-    # Validate CNN_CHANNELS vs TRANSFORMER_HEADS
-    cnn_channels = int(getattr(config, "CNN_CHANNELS", 512))
-    heads = int(getattr(config, "TRANSFORMER_HEADS", 8))
-    if cnn_channels % heads != 0:
-        raise ValueError(f"CNN_CHANNELS({cnn_channels}) must be divisible by TRANSFORMER_HEADS({heads})")
-
     # Helper: pass only kwargs supported by the target callable (keeps backward compatibility)
     def _filter_kwargs(callable_obj, kwargs: dict) -> dict:
         try:
@@ -786,12 +748,15 @@ def main():
             dropout=config.TRANSFORMER_DROPOUT,
             use_stn=config.USE_STN,
             backbone_type=config.BACKBONE_TYPE,
-            backbone_variant=getattr(config, "BACKBONE_VARIANT", "tiny"),
-            drop_path_rate=float(getattr(config, "DROPPATH_RATE", 0.0)),
             aux_sr=config.AUX_SR,
             cnn_channels=int(getattr(config, "CNN_CHANNELS", 512)),
-            timm_model=str(getattr(config, "TIMM_MODEL", "") or ""),
-            timm_out_index=int(getattr(config, "TIMM_OUT_INDEX", 0)),
+            fusion_type=str(getattr(config, "FUSION_TYPE", "attn")),
+            drop_path_rate=float(getattr(config, "DROPPATH_RATE", 0.0)),
+            temporal_heads=int(getattr(config, "TEMPORAL_HEADS", 8)),
+            temporal_layers=int(getattr(config, "TEMPORAL_LAYERS", 2)),
+            temporal_ff_dim=int(getattr(config, "TEMPORAL_FF_DIM", 1024)),
+            temporal_dropout=float(getattr(config, "TEMPORAL_DROPOUT", 0.1)),
+
             # optional extras (only used if your ResTranOCR __init__ supports them)
             frame_dropout=float(getattr(config, "FRAME_DROPOUT", 0.0)),
             backbone_pretrained=bool(getattr(config, "BACKBONE_PRETRAINED", False)),

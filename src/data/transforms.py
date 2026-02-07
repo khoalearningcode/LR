@@ -1,27 +1,14 @@
 """Augmentation pipelines for training, validation, and degradation."""
 import albumentations as A
-from albumentations.pytorch import ToTensorV2
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-HALF_MEAN = (0.5, 0.5, 0.5)
-HALF_STD = (0.5, 0.5, 0.5)
+IMAGENET_STD  = (0.229, 0.224, 0.225)
+
+from albumentations.pytorch import ToTensorV2
 
 
-def get_norm_stats(norm: str):
-    if (norm or "half").lower() == "imagenet":
-        return IMAGENET_MEAN, IMAGENET_STD
-    return HALF_MEAN, HALF_STD
-
-
-def get_train_transforms(
-    img_height: int = 32,
-    img_width: int = 128,
-    lr_sim_p: float = 0.0,
-    input_norm: str = "half",
-) -> A.Compose:
+def get_train_transforms(img_height: int = 32, img_width: int = 128, lr_sim_p: float = 0.0) -> A.Compose:
     """Training augmentation pipeline with geometric and color transforms."""
-    mean, std = get_norm_stats(input_norm)
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
 
@@ -61,19 +48,13 @@ def get_train_transforms(
             hole_width_range=(4, 8),
             p=0.3
         ),
-        A.Normalize(mean=mean, std=std),
+        A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2()
     ])
 
 
-def get_light_transforms(
-    img_height: int = 32,
-    img_width: int = 128,
-    lr_sim_p: float = 0.0,
-    input_norm: str = "half",
-) -> A.Compose:
+def get_light_transforms(img_height: int = 32, img_width: int = 128, lr_sim_p: float = 0.0) -> A.Compose:
     """Light training pipeline: resize + normalize + mild LR simulation."""
-    mean, std = get_norm_stats(input_norm)
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
 
@@ -84,7 +65,7 @@ def get_light_transforms(
             A.GaussianBlur(blur_limit=(3, 5), p=1.0),
         ], p=lr_sim_p),
 
-        A.Normalize(mean=mean, std=std),
+        A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2(),
     ])
 
@@ -105,15 +86,10 @@ def get_degradation_transforms() -> A.Compose:
     ])
 
 
-def get_val_transforms(
-    img_height: int = 32,
-    img_width: int = 128,
-    input_norm: str = "half",
-) -> A.Compose:
+def get_val_transforms(img_height: int = 32, img_width: int = 128) -> A.Compose:
     """Validation transform pipeline (resize + normalize only)."""
-    mean, std = get_norm_stats(input_norm)
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
-        A.Normalize(mean=mean, std=std),
+        A.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ToTensorV2()
     ])

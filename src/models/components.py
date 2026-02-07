@@ -1,8 +1,27 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models as tvm
 import math
+
+class DropPath(nn.Module):
+    """Stochastic Depth / DropPath (per-sample).
+
+    This is a light-weight regularization that helps when scaling ConvNeXt depth.
+    """
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = float(drop_prob)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.drop_prob == 0.0 or (not self.training):
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        # Work with tensors of any dimensionality
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()
+        return x.div(keep_prob) * random_tensor
+
 
 class LayerNorm2d(nn.Module):
     """LayerNorm that supports [N, C, H, W] inputs."""
@@ -32,7 +51,7 @@ class ConvNeXtBlock(nn.Module):
         self.pwconv2 = nn.Linear(4 * dim, dim)
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)), 
                                     requires_grad=True) if layer_scale_init_value > 0 else None
-        self.drop_path = nn.Identity()  # Placeholder, can add DropPath if needed
+        self.drop_path = DropPath(drop_path) if drop_path and drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
         input = x
@@ -56,7 +75,7 @@ class ConvNeXtFeatureExtractor(nn.Module):
     Input: [N, 3, 32, 128]
     Output: [N, dims[-1], 1, 32] (Sequence length ~32)
     """
-    def __init__(self, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]):
+    def __init__(self, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], drop_path_rate: float = 0.0, layer_scale_init_value: float = 1e-6):
         super().__init__()
         self.downsample_layers = nn.ModuleList()
         
@@ -93,11 +112,23 @@ class ConvNeXtFeatureExtractor(nn.Module):
         self.downsample_layers.append(downsample_layer3)
 
         self.stages = nn.ModuleList()
+
+        # Stochastic depth decay rule
+        total_blocks = sum(depths)
+        dp_rates = torch.linspace(0, float(drop_path_rate), total_blocks).tolist() if total_blocks > 0 else []
+        cur = 0
         for i in range(4):
-            stage = nn.Sequential(
-                *[ConvNeXtBlock(dim=dims[i]) for _ in range(depths[i])]
-            )
-            self.stages.append(stage)
+            blocks = []
+            for j in range(depths[i]):
+                blocks.append(
+                    ConvNeXtBlock(
+                        dim=dims[i],
+                        drop_path=float(dp_rates[cur + j]) if dp_rates else 0.0,
+                        layer_scale_init_value=layer_scale_init_value,
+                    )
+                )
+            cur += depths[i]
+            self.stages.append(nn.Sequential(*blocks))
 
         self.final_norm = LayerNorm2d(dims[-1], eps=1e-6)
         
@@ -163,13 +194,16 @@ class AttentionFusion(nn.Module):
     Attention-based fusion module for combining multi-frame features.
     Computes a weighted sum of features from multiple frames based on their 'quality' scores.
     """
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, num_frames: int = 5, frame_dropout: float = 0.0):
         super().__init__()
+        self.num_frames = int(num_frames)
+        self.frame_dropout = float(frame_dropout)
+
         # A small CNN to predict attention scores (quality map) from features
         self.score_net = nn.Sequential(
-            nn.Conv2d(channels, channels // 8, kernel_size=1),
+            nn.Conv2d(channels, max(1, channels // 8), kernel_size=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(channels // 8, 1, kernel_size=1)
+            nn.Conv2d(max(1, channels // 8), 1, kernel_size=1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -180,21 +214,101 @@ class AttentionFusion(nn.Module):
             Fused feature map. Shape: [Batch, C, H, W]
         """
         total_frames, c, h, w = x.size()
-        num_frames = 5  # Fixed based on dataset
-        batch_size = total_frames // num_frames
+        nf = self.num_frames
+        assert total_frames % nf == 0, f"Expected total_frames % num_frames == 0, got {total_frames} vs {nf}"
+        batch_size = total_frames // nf
 
         # Reshape to [Batch, Frames, C, H, W]
-        x_view = x.view(batch_size, num_frames, c, h, w)
-        
-        # Calculate attention scores: [Batch, Frames, 1, H, W]
-        scores = self.score_net(x).view(batch_size, num_frames, 1, h, w)
-        weights = F.softmax(scores, dim=1)  # Normalize scores across frames
+        x_view = x.view(batch_size, nf, c, h, w)
 
-        # Weighted sum fusion
+        # Scores: [Batch, Frames, 1, H, W]
+        scores = self.score_net(x).view(batch_size, nf, 1, h, w)
+
+        # Frame dropout (train-time only): force fusion to not overfit to one frame
+        if self.training and self.frame_dropout > 0.0:
+            keep = (torch.rand(batch_size, nf, device=x.device) >= self.frame_dropout)  # [B, F]
+            # Ensure at least one frame kept for each sample
+            none = ~keep.any(dim=1)
+            if none.any():
+                ridx = torch.randint(0, nf, (int(none.sum().item()),), device=x.device)
+                keep[none, ridx] = True
+            keep = keep.view(batch_size, nf, 1, 1, 1)
+            scores = scores.masked_fill(~keep, -1e4)
+
+        weights = F.softmax(scores, dim=1)
         fused_features = torch.sum(x_view * weights, dim=1)
         return fused_features
 
 
+class TemporalTransformerFusion(nn.Module):
+    """Temporal transformer across frames (per-timestep), then attention pooling.
+
+    Input:  features from all frames  [B*F, C, 1, W]
+    Output: fused features             [B,   C, 1, W]
+    """
+    def __init__(
+        self,
+        d_model: int,
+        num_frames: int = 5,
+        nhead: int = 8,
+        num_layers: int = 2,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        frame_dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.num_frames = int(num_frames)
+        self.frame_dropout = float(frame_dropout)
+
+        if d_model % nhead != 0:
+            raise ValueError(f"TemporalTransformerFusion: d_model ({d_model}) must be divisible by nhead ({nhead}).")
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.score = nn.Linear(d_model, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        total_frames, c, h, w = x.size()
+        nf = self.num_frames
+        assert total_frames % nf == 0, f"Expected total_frames % num_frames == 0, got {total_frames} vs {nf}"
+        b = total_frames // nf
+
+        # [B, F, C, H, W] -> squeeze H (should be 1) -> [B, F, C, W]
+        x = x.view(b, nf, c, h, w).squeeze(3)
+
+        # Arrange as per-width timestep batches:
+        # [B, F, C, W] -> [B, W, F, C] -> [B*W, F, C]
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = x.view(b * w, nf, c)
+
+        src_key_padding_mask = None
+        if self.training and self.frame_dropout > 0.0:
+            keep = (torch.rand(b * w, nf, device=x.device) >= self.frame_dropout)
+            none = ~keep.any(dim=1)
+            if none.any():
+                ridx = torch.randint(0, nf, (int(none.sum().item()),), device=x.device)
+                keep[none, ridx] = True
+            src_key_padding_mask = ~keep  # True means "masked / ignored" for TransformerEncoder
+
+        x_enc = self.encoder(x, src_key_padding_mask=src_key_padding_mask)  # [B*W, F, C]
+
+        scores = self.score(x_enc).squeeze(-1)  # [B*W, F]
+        if src_key_padding_mask is not None:
+            scores = scores.masked_fill(src_key_padding_mask, -1e4)
+
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # [B*W, F, 1]
+        fused = (x_enc * weights).sum(dim=1)  # [B*W, C]
+
+        # Back to feature map: [B*W, C] -> [B, C, 1, W]
+        fused = fused.view(b, w, c).permute(0, 2, 1).unsqueeze(2).contiguous()
+        return fused
 class CNNBackbone(nn.Module):
     """A simple CNN backbone for CRNN baseline."""
     def __init__(self, out_channels=512):
@@ -219,89 +333,76 @@ class CNNBackbone(nn.Module):
         return self.features(x)
 
 
+
 class ResNetFeatureExtractor(nn.Module):
     """
-    Torchvision ResNet/ResNeXt/WideResNet backbone customized for OCR.
-    - Preserves width by changing the first stride-2 blocks in layer3 and layer4 to stride (2,1).
-    - Collapses height to 1 with adaptive pooling.
-    Supported arch names:
-      resnet34, resnet50, resnet101, resnext50, resnext101, wide_resnet50
+    ResNet/ResNeXt/Wide-ResNet backbone customized for OCR.
+
+    Key idea: keep width (time steps) as large as possible by changing strides
+    in layer3 & layer4 from (2,2) to (2,1) so we downsample height but not width.
+
+    Supports: resnet34, resnet50, resnet101, resnext50, resnext101, wide_resnet50
     """
     def __init__(self, arch: str = "resnet34", pretrained: bool = False):
         super().__init__()
+        from torchvision import models as tvm
+        from torchvision.models.resnet import BasicBlock, Bottleneck
+
         arch = (arch or "resnet34").lower()
+        if arch == "resnet34":
+            weights = tvm.ResNet34_Weights.DEFAULT if pretrained else None
+            m = tvm.resnet34(weights=weights)
+        elif arch == "resnet50":
+            weights = tvm.ResNet50_Weights.DEFAULT if pretrained else None
+            m = tvm.resnet50(weights=weights)
+        elif arch == "resnet101":
+            weights = tvm.ResNet101_Weights.DEFAULT if pretrained else None
+            m = tvm.resnet101(weights=weights)
+        elif arch == "resnext50":
+            weights = tvm.ResNeXt50_32X4D_Weights.DEFAULT if pretrained else None
+            m = tvm.resnext50_32x4d(weights=weights)
+        elif arch == "resnext101":
+            weights = tvm.ResNeXt101_32X8D_Weights.DEFAULT if pretrained else None
+            m = tvm.resnext101_32x8d(weights=weights)
+        elif arch == "wide_resnet50":
+            weights = tvm.Wide_ResNet50_2_Weights.DEFAULT if pretrained else None
+            m = tvm.wide_resnet50_2(weights=weights)
+        else:
+            raise ValueError(f"Unsupported ResNet arch: {arch}")
 
-        # Build torchvision model with best-effort weight loading across torchvision versions
-        def _get_weights(name: str):
-            if not pretrained:
-                return None
-            # Newer torchvision uses enum weights, older uses pretrained=True
-            try:
-                w = tvm.get_model_weights(name).DEFAULT
-                return w
-            except Exception:
-                return "DEFAULT"
+        # Stem
+        self.conv1 = m.conv1
+        self.bn1 = m.bn1
+        self.relu = m.relu
+        self.maxpool = m.maxpool
 
-        # Map our short names to torchvision model names / constructors
-        name_map = {
-            "resnet34": "resnet34",
-            "resnet50": "resnet50",
-            "resnet101": "resnet101",
-            "resnext50": "resnext50_32x4d",
-            "resnext101": "resnext101_32x8d",
-            "wide_resnet50": "wide_resnet50_2",
-        }
-        if arch not in name_map:
-            raise ValueError(f"Unsupported arch: {arch}. Choose from {list(name_map.keys())}")
+        # Stages
+        self.layer1 = m.layer1
+        self.layer2 = m.layer2
+        self.layer3 = m.layer3
+        self.layer4 = m.layer4
 
-        tv_name = name_map[arch]
-
-        model = None
-        try:
-            # torchvision >= 0.15
-            model = tvm.get_model(tv_name, weights=_get_weights(tv_name))
-        except Exception:
-            # fallback: direct constructors
-            ctor = getattr(tvm, tv_name)
-            try:
-                model = ctor(weights=_get_weights(tv_name))
-            except TypeError:
-                model = ctor(pretrained=bool(pretrained))
-
-        # Stem / stages
-        self.conv1 = model.conv1
-        self.bn1 = model.bn1
-        self.relu = model.relu
-        self.maxpool = model.maxpool
-        self.layer1 = model.layer1
-        self.layer2 = model.layer2
-        self.layer3 = model.layer3
-        self.layer4 = model.layer4
-
-        # Infer output channels
-        self.out_channels = int(getattr(model.fc, "in_features", 512))
-
-        # ---- OCR stride customization ----
-        # For BasicBlock: stride is in conv1
-        # For Bottleneck: stride is in conv2
-        def _set_stride(block, stride_hw):
-            # Torchvision blocks:
-            # - BasicBlock: has conv1/conv2, no conv3, stride is applied in conv1
-            # - Bottleneck: has conv1/conv2/conv3, stride is applied in conv2
-            if hasattr(block, "conv3"):
-                # Bottleneck
+        def _set_block_stride(block: nn.Module, stride_hw):
+            # Bottleneck: stride is in conv2 (torchvision ResNet v1.5 style)
+            if isinstance(block, Bottleneck):
                 block.conv2.stride = stride_hw
             else:
-                # BasicBlock
+                # BasicBlock: stride is in conv1
                 block.conv1.stride = stride_hw
-            if block.downsample is not None:
-                block.downsample[0].stride = stride_hw
+            if block.downsample is not None and len(block.downsample) > 0:
+                ds = block.downsample[0]
+                if hasattr(ds, "stride"):
+                    ds.stride = stride_hw
 
-        # Change the first block of layer3 and layer4 from stride (2,2) -> (2,1)
-        _set_stride(self.layer3[0], (2, 1))
-        _set_stride(self.layer4[0], (2, 1))
+        # Change the first block of layer3 and layer4: (2,2) -> (2,1)
+        _set_block_stride(self.layer3[0], (2, 1))
+        _set_block_stride(self.layer4[0], (2, 1))
+
+        # Infer output channels from classifier input features
+        self.out_channels = int(m.fc.in_features)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # [B, 3, H, W] -> [B, C, H', W']
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -312,43 +413,9 @@ class ResNetFeatureExtractor(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        # [B, C, H', W'] -> [B, C, 1, W'] for sequence modeling
+        # Pool height to 1 to make a sequence over width
         x = F.adaptive_avg_pool2d(x, (1, None))
         return x
-
-
-class TimmFeatureExtractor(nn.Module):
-    """
-    Generic backbone from timm with features_only=True.
-    Returns feature map as [B, C, 1, W] by pooling height -> 1.
-    """
-    def __init__(self, timm_model: str, pretrained: bool = True, out_index: int = 0):
-        super().__init__()
-        try:
-            import timm
-        except Exception as e:
-            raise ImportError("Please install timm: pip install timm") from e
-
-        self.timm_model = timm_model
-        self.out_index = int(out_index)
-
-        self.model = timm.create_model(
-            timm_model,
-            pretrained=bool(pretrained),
-            features_only=True,
-            out_indices=(self.out_index,),
-        )
-        ch = self.model.feature_info.channels()[0]
-        self.out_channels = int(ch)
-
-    def forward(self, x):
-        feats = self.model(x)
-        x = feats[0]
-        if x.shape[2] != 1:
-            x = x.mean(dim=2, keepdim=True)
-        return x
-
-
 class PositionalEncoding(nn.Module):
     """
     Injects information about the relative or absolute position of the tokens in the sequence.
