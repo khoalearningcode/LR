@@ -376,6 +376,13 @@ def parse_args() -> argparse.Namespace:
         help="Input normalization scheme: half or imagenet (default: half or auto for pretrained)",
     )
     parser.add_argument(
+        "--input-color",
+        type=str,
+        choices=["bgr", "rgb"],
+        default=None,
+        help="Input color order for cv2-loaded images: bgr or rgb (default: bgr or auto for pretrained)",
+    )
+    parser.add_argument(
         "--timm-model",
         type=str,
         default=None,
@@ -516,6 +523,8 @@ def main():
 
     if args.input_norm is not None:
         setattr(config, "INPUT_NORM", str(args.input_norm))
+    if args.input_color is not None:
+        setattr(config, "INPUT_COLOR", str(args.input_color))
     if args.timm_model is not None:
         setattr(config, "TIMM_MODEL", str(args.timm_model))
     if args.timm_out_index is not None:
@@ -536,13 +545,21 @@ def main():
     # store backbone_pretrained for model construction if supported
     setattr(config, "BACKBONE_PRETRAINED", bool(args.backbone_pretrained))
 
-    # auto input norm for pretrained (unless user provided)
+    # auto input norm / color for pretrained (unless user provided)
+    backbone_type = getattr(config, "BACKBONE_TYPE", "convnext")
+    use_pretrained = bool(getattr(config, "BACKBONE_PRETRAINED", False))
+
     if args.input_norm is None:
-        backbone_type = getattr(config, "BACKBONE_TYPE", "convnext")
-        if bool(getattr(config, "BACKBONE_PRETRAINED", False)) and backbone_type != "convnext":
+        if use_pretrained:
             setattr(config, "INPUT_NORM", "imagenet")
         elif getattr(config, "INPUT_NORM", None) is None:
             setattr(config, "INPUT_NORM", "half")
+
+    if args.input_color is None:
+        if use_pretrained and backbone_type in {"timm", "resnet", "resnet34", "resnet50", "resnet101", "resnext50", "resnext101", "wide_resnet50"}:
+            setattr(config, "INPUT_COLOR", "rgb")
+        elif getattr(config, "INPUT_COLOR", None) is None:
+            setattr(config, "INPUT_COLOR", "bgr")
 
     # checkpoint frequency overrides
     if args.save_every_epochs is not None:
@@ -642,6 +659,7 @@ def main():
         "seed": config.SEED,
         "augmentation_level": config.AUGMENTATION_LEVEL,
         "input_norm": getattr(config, "INPUT_NORM", "half"),
+        "input_color": getattr(config, "INPUT_COLOR", "bgr"),
     }
 
     # Optional: mild LR simulation probability for REAL LR frames (only if dataset supports it)
@@ -676,6 +694,7 @@ def main():
                 char2idx=config.CHAR2IDX,
                 seed=config.SEED,
                 input_norm=getattr(config, "INPUT_NORM", "half"),
+                input_color=getattr(config, "INPUT_COLOR", "bgr"),
                 is_test=True,
             )
             test_loader = DataLoader(

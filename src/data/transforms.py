@@ -8,8 +8,8 @@ HALF_MEAN = (0.5, 0.5, 0.5)
 HALF_STD = (0.5, 0.5, 0.5)
 
 
-def _get_norm(input_norm: str):
-    if (input_norm or "half").lower() == "imagenet":
+def get_norm_stats(norm: str):
+    if (norm or "half").lower() == "imagenet":
         return IMAGENET_MEAN, IMAGENET_STD
     return HALF_MEAN, HALF_STD
 
@@ -21,7 +21,7 @@ def get_train_transforms(
     input_norm: str = "half",
 ) -> A.Compose:
     """Training augmentation pipeline with geometric and color transforms."""
-    mean, std = _get_norm(input_norm)
+    mean, std = get_norm_stats(input_norm)
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
 
@@ -73,7 +73,7 @@ def get_light_transforms(
     input_norm: str = "half",
 ) -> A.Compose:
     """Light training pipeline: resize + normalize + mild LR simulation."""
-    mean, std = _get_norm(input_norm)
+    mean, std = get_norm_stats(input_norm)
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
 
@@ -111,7 +111,7 @@ def get_val_transforms(
     input_norm: str = "half",
 ) -> A.Compose:
     """Validation transform pipeline (resize + normalize only)."""
-    mean, std = _get_norm(input_norm)
+    mean, std = get_norm_stats(input_norm)
     return A.Compose([
         A.Resize(height=img_height, width=img_width),
         A.Normalize(mean=mean, std=std),

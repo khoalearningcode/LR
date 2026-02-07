@@ -40,6 +40,7 @@ class MultiFrameDataset(Dataset):
         full_train: bool = False,
         train_lr_sim_p: float = 0.0,
         input_norm: str = "half",
+        input_color: str = "bgr",
     ):
         """
         Args:
@@ -67,6 +68,7 @@ class MultiFrameDataset(Dataset):
         self.full_train = full_train
         self.train_lr_sim_p = train_lr_sim_p
         self.input_norm = input_norm
+        self.input_color = (input_color or "bgr").lower()
         
         if mode == 'train':
             # Training: apply augmentation on the fly
@@ -269,10 +271,15 @@ class MultiFrameDataset(Dataset):
         lr_images_list = []
         hr_images_list = [] # List mới
         
+        hr_transform = get_val_transforms(self.img_height, self.img_width, input_norm=self.input_norm)
+
         for p in img_paths:
             # Load HR
             image_hr = cv2.imread(p, cv2.IMREAD_COLOR)
-            image_hr = cv2.cvtColor(image_hr, cv2.COLOR_BGR2RGB)
+            if image_hr is None:
+                raise FileNotFoundError(f"Failed to read image: {p}")
+            if self.input_color == "rgb":
+                image_hr = cv2.cvtColor(image_hr, cv2.COLOR_BGR2RGB)
             
             # Xử lý LR
             image_lr = image_hr.copy()
@@ -282,8 +289,6 @@ class MultiFrameDataset(Dataset):
             lr_images_list.append(image_lr)
             
             # Xử lý HR Target (Dùng val transform để chỉ resize/normalize chuẩn)
-            # Lưu ý: Import get_val_transforms ở đầu file nếu chưa có
-            hr_transform = get_val_transforms(self.img_height, self.img_width)
             image_hr_tensor = hr_transform(image=image_hr)['image']
             hr_images_list.append(image_hr_tensor)
 

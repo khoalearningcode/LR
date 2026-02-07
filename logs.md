@@ -117,5 +117,129 @@ python train.py -m restran --backbone timm \
     <td style="border: 1px solid white;">—</td>
     <td style="border: 1px solid white;">—</td>
   </tr>
+  <tr>
+    <td style="border: 1px solid white;">TIMM_CXv2T_fcmae22k_o1_w192</td>
+    <td style="border: 1px solid white;">
+
+```bash
+python train.py -m restran --backbone timm \
+  --timm-model convnextv2_tiny.fcmae_ft_in22k_in1k --timm-out-index 1 \
+  --backbone-pretrained --input-norm imagenet \
+  --aug-level full --epochs 30 \
+  --img-width 192 --train-lr-sim-p 0.35 --frame-dropout 0.20 \
+  --lr 2e-4 \
+  --run-tag TIMM_CXv2T_fcmae22k_o1_w192 \
+  --batch-size 32 --save-every-steps 200 --overwrite
+```
+
+</td>
+    <td style="border: 1px solid white;">77.18%</td>
+    <td style="border: 1px solid white;">—</td>
+    <td style="border: 1px solid white;">—</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid white;">TIMM_CXS_fb22k_o1_w192</td>
+    <td style="border: 1px solid white;">
+
+```bash
+python train.py -m restran --backbone timm \
+  --timm-model convnext_small.fb_in22k_ft_in1k --timm-out-index 1 \
+  --backbone-pretrained --input-norm imagenet \
+  --aug-level full --epochs 30 \
+  --img-width 192 --train-lr-sim-p 0.35 --frame-dropout 0.20 \
+  --lr 1.5e-4 \
+  --run-tag TIMM_CXS_fb22k_o1_w192 \
+  --batch-size 32 --save-every-steps 200 --overwrite
+```
+
+</td>
+    <td style="border: 1px solid white;">76.68%</td>
+    <td style="border: 1px solid white;">—</td>
+    <td style="border: 1px solid white;">—</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid white;">TIMM_CXB_fb22k_o1_w192</td>
+    <td style="border: 1px solid white;">
+
+```bash
+python train.py -m restran --backbone timm \
+  --timm-model convnext_base.fb_in22k_ft_in1k --timm-out-index 1 \
+  --backbone-pretrained --input-norm imagenet \
+  --aug-level full --epochs 30 \
+  --img-width 192 --train-lr-sim-p 0.35 --frame-dropout 0.20 \
+  --lr 1e-4 \
+  --run-tag TIMM_CXB_fb22k_o1_w192 \
+  --batch-size 32 --overwrite
+```
+
+</td>
+    <td style="border: 1px solid white;">76.78%</td>
+    <td style="border: 1px solid white;">—</td>
+    <td style="border: 1px solid white;">—</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid white;">CX_SMALL_w192_dp010_lr3e4</td>
+    <td style="border: 1px solid white;">
+
+```bash
+python train.py -m restran --backbone convnext --backbone-variant small \
+  --aug-level full --epochs 30 \
+  --img-width 192 \
+  --train-lr-sim-p 0.35 --frame-dropout 0.20 \
+  --droppath 0.10 \
+  --lr 3e-4 \
+  --run-tag CX_SMALL_w192_dp010_lr3e4 \
+  --batch-size 32 \
+  --overwrite
+```
+
+</td>
+    <td style="border: 1px solid white;">77.28%</td>
+    <td style="border: 1px solid white;">—</td>
+    <td style="border: 1px solid white;">—</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid white;">CX_BASE_w192_dp015_lr2e4</td>
+    <td style="border: 1px solid white;">
+
+```bash
+python train.py -m restran --backbone convnext --backbone-variant base \
+  --aug-level full --epochs 30 \
+  --img-width 192 \
+  --train-lr-sim-p 0.35 --frame-dropout 0.20 \
+  --droppath 0.15 \
+  --lr 2e-4 \
+  --run-tag CX_BASE_w192_dp015_lr2e4 \
+  --batch-size 32 \
+  --overwrite
+```
+
+</td>
+    <td style="border: 1px solid white;">77.88%</td>
+    <td style="border: 1px solid white;">—</td>
+    <td style="border: 1px solid white;">—</td>
+  </tr>
+  <tr>
+    <td style="border: 1px solid white;">TIMM_EFFV2RWS_o1_w192_lr2e4</td>
+    <td style="border: 1px solid white;">
+
+```bash
+python train.py -m restran --backbone timm \
+  --timm-model efficientnetv2_rw_s.ra2_in1k --timm-out-index 1 \
+  --backbone-pretrained --input-norm imagenet \
+  --aug-level full --epochs 30 \
+  --img-width 192 --train-lr-sim-p 0.35 --frame-dropout 0.20 \
+  --lr 2e-4 \
+  --run-tag TIMM_EFFV2RWS_o1_w192_lr2e4 \
+  --batch-size 32 \
+  --overwrite
+```
+
+</td>
+    <td style="border: 1px solid white;">74.77%</td>
+    <td style="border: 1px solid white;">—</td>
+    <td style="border: 1px solid white;">—</td>
+  </tr>
 </tbody>
 </table>
+
