@@ -283,6 +283,13 @@ def parse_args() -> argparse.Namespace:
         help="ConvNeXt stochastic depth rate (0.0~0.2) (default: from config)"
     )
     parser.add_argument(
+        "--droppath",
+        type=float,
+        default=None,
+        help="Alias of --drop-path-rate (kept for backward-compatible commands)",
+    )
+
+    parser.add_argument(
         "--fusion",
         type=str,
         choices=["attn", "temporal"],
@@ -380,10 +387,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backbone",
         type=str,
-        choices=["resnet", "convnext", "convnext_tiny", "convnext_mid", "convnext_small", "convnext_base"],
+        choices=[
+            "resnet",
+            "resnet34",
+            "resnet50",
+            "resnet101",
+            "resnext50",
+            "resnext101",
+            "wide_resnet50",
+            "convnext",
+            "convnext_tiny",
+            "convnext_mid",
+            "convnext_small",
+            "convnext_base",
+        ],
         default=None,
-        help="Backbone architecture for ResTran: 'resnet' or 'convnext'",
+        help="Backbone architecture for ResTran (default: from config)",
     )
+    parser.add_argument(
+        "--backbone-variant",
+        type=str,
+        choices=["tiny", "mid", "small", "base"],
+        default=None,
+        help="Shortcut for ConvNeXt variants when --backbone convnext (maps to convnext_<variant>)",
+    )
+
     parser.add_argument(
         "--sr-aux",
         action="store_true",

@@ -39,6 +39,7 @@ class MultiFrameDataset(Dataset):
         is_test: bool = False,
         full_train: bool = False,
         train_lr_sim_p: float = 0.0,
+        input_norm: str = "half",
     ):
         """
         Args:
