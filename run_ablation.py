@@ -1,440 +1,349 @@
 #!/usr/bin/env python3
-"""Run wide backbone ablation for ICPR2026 LRLPR (ResTran + STN).
+"""
+Run backbone ablation by launching `train.py` multiple times (one run per backbone x {scratch,pretrained}).
 
-Mục tiêu
-- Quét ~20 backbone (ưu tiên không ConvNeXt), mỗi backbone chạy 2 chế độ:
-  (1) from-scratch  (2) pretrained (nếu train.py hỗ trợ --backbone-pretrained)
-- Không override img-width / lrSim / frame-dropout mặc định (lấy theo configs/config.py).
-- Mỗi run tự lưu checkpoint theo cơ chế của train.py.
-- Mỗi run có run-tag + log riêng.
-- Luôn cập nhật 1 file kết quả (TSV) + 1 file summary (TXT) để biết đã chạy gì và điểm ra sao.
-- Nếu một run bị dừng giữa chừng: lần sau script sẽ archive folder run đó và chạy lại từ đầu backbone đó.
+- Chỉ ablate BACKBONE + pretrained vs scratch. Không ép img-width / lrSim / frame-dropout... (dùng đúng config.py).
+- Mỗi run có RUN_DIR riêng để giữ checkpoint.
+- Ghi kết quả ra 1 file duy nhất và luôn REWRITE (không bị trùng dòng) để biết đã chạy gì.
+- Nếu có thư mục run_dir nhưng chưa "xong", script sẽ archive nó và chạy lại từ đầu lần sau (không resume nửa chừng).
 
-Chạy nhanh
-  python run_ablation.py --output-root results/ablation_base --epochs 30 --batch-size 32
+Ví dụ:
+  python run_ablation_v2.py --train-py ./train.py --output-root results/ablation_backbones
 
-Gợi ý quota GPU
-  python run_ablation.py --max-runs 6 --output-root results/ablation_base
-
-Filter
-  python run_ablation.py --only regnet,eff --use-timm
-
-Lưu ý
-- Script sẽ tự đọc `python train.py -h` để biết train.py có hỗ trợ timm / pretrained / output-dir hay không.
-- Nếu bạn bật --use-timm, script sẽ cố lấy đúng 20 model timm có pretrained (convnets, tránh ViT/Swin).
+Tuỳ chọn:
+  --max-runs 6           # chỉ chạy N config đầu tiên
+  --only "resnet50"      # chỉ chạy backbone chứa chuỗi này
+  --skip-pretrained      # chỉ scratch
+  --batch-size 32        # override (0 = không override, dùng config.py)
+  --save-every-steps 200 # checkpoint step-level (0 = tắt)
 """
 
 from __future__ import annotations
-
 import argparse
-import csv
-import datetime as _dt
+import json
 import re
+import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+ACC_PATTERNS = [
+    re.compile(r"Best Val Acc:\s*([0-9]+(?:\.[0-9]+)?)\s*%?", re.IGNORECASE),
+    re.compile(r"✅\s*Training complete!\s*Best Val Acc:\s*([0-9]+(?:\.[0-9]+)?)\s*%?", re.IGNORECASE),
+]
 
-def now_stamp() -> str:
-    return _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+DONE_MARKERS = [
+    "summary.md",
+    "run_meta.json",
+    "restran_best.pth",
+    "checkpoints/best.pt",
+]
 
+@dataclass(frozen=True)
+class Exp:
+    backbone: str
+    pretrained: bool
+    tag: str
 
-def run_cmd(cmd: List[str], cwd: Path, log_path: Path) -> int:
+def _now() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def _run(cmd: List[str], log_path: Path) -> Tuple[int, str]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+    )
+    lines: List[str] = []
     with open(log_path, "w", encoding="utf-8") as f:
-        f.write("CMD:\n" + " ".join(cmd) + "\n\n")
-        f.flush()
-        p = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        assert p.stdout is not None
-        for line in p.stdout:
+        for line in proc.stdout:  # type: ignore
+            lines.append(line)
             f.write(line)
-        p.wait()
-        f.write(f"\n[EXIT_CODE] {p.returncode}\n")
-    return int(p.returncode)
+    rc = proc.wait()
+    return rc, "".join(lines)
 
-
-def parse_train_help(train_py: Path) -> str:
-    cmd = [sys.executable, str(train_py), "-h"]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    return (p.stdout or "") + "\n" + (p.stderr or "")
-
-
-def parse_backbone_choices(help_text: str) -> List[str]:
-    m = re.search(r"--backbone\s+\{([^}]+)\}", help_text)
-    if not m:
-        return []
-    raw = m.group(1).strip()
-    return [x.strip() for x in raw.split(",") if x.strip()]
-
-
-def has_flag(help_text: str, flag: str) -> bool:
-    return flag in help_text
-
-
-def safe_tag(s: str) -> str:
-    s = s.replace("/", "_").replace(":", "_").replace(".", "_").replace(" ", "_")
-    s = re.sub(r"[^A-Za-z0-9_\-]+", "_", s)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s[:120]
-
-
-def extract_best_val_acc(log_path: Path) -> Optional[float]:
-    if not log_path.exists():
-        return None
-    txt = log_path.read_text(encoding="utf-8", errors="ignore")
-
-    # ưu tiên "Best Val Acc" ở cuối
-    pats = [
-        r"Best Val Acc:\s*([0-9]+(?:\.[0-9]+)?)\s*%",
-        r"✅ Training complete! Best Val Acc:\s*([0-9]+(?:\.[0-9]+)?)\s*%",
-        r"Training complete! Best Val Acc:\s*([0-9]+(?:\.[0-9]+)?)\s*%",
-        r"Best Val Acc:\s*([0-9]+(?:\.[0-9]+)?)\b",
-    ]
-    for pat in pats:
-        ms = re.findall(pat, txt)
-        if ms:
+def _parse_best_acc(text: str) -> Optional[float]:
+    for pat in ACC_PATTERNS:
+        m = pat.search(text)
+        if m:
             try:
-                return float(ms[-1])
+                return float(m.group(1))
             except Exception:
-                pass
-
-    # fallback: max Val Acc
-    vals = re.findall(r"Val Acc:\s*([0-9]+(?:\.[0-9]+)?)\s*%", txt)
-    if vals:
-        try:
-            return max(float(v) for v in vals)
-        except Exception:
-            return None
+                return None
     return None
 
-
-def write_results_tsv(results_tsv: Path, row: Dict[str, str]) -> None:
-    results_tsv.parent.mkdir(parents=True, exist_ok=True)
-    exists = results_tsv.exists()
-    with open(results_tsv, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "time", "run_tag", "kind", "backbone", "mode",
-                "status", "best_val_acc", "run_dir", "log_path",
-            ],
-            delimiter="\t",
-        )
-        if not exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-
-def load_existing(results_tsv: Path) -> Dict[str, Dict[str, str]]:
-    if not results_tsv.exists():
-        return {}
-    last: Dict[str, Dict[str, str]] = {}
-    with open(results_tsv, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for r in reader:
-            if r.get("run_tag"):
-                last[r["run_tag"]] = r
-    return last
-
-
-def rewrite_summary(results_tsv: Path, summary_txt: Path) -> None:
-    if not results_tsv.exists():
-        return
-    rows: List[Tuple[float, Dict[str, str]]] = []
-    with open(results_tsv, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for r in reader:
-            if r.get("status") != "DONE":
-                continue
-            try:
-                acc = float(r.get("best_val_acc") or "nan")
-            except Exception:
-                continue
-            if acc == acc:
-                rows.append((acc, r))
-
-    rows.sort(key=lambda x: x[0], reverse=True)
-    lines = [
-        f"ABRATION SUMMARY | updated: {now_stamp()}",
-        f"source: {results_tsv}",
-        "",
-    ]
-    if not rows:
-        lines.append("No DONE runs yet.")
-    else:
-        best = rows[0][1]
-        lines.append(
-            f"BEST: {best['run_tag']} | {best['best_val_acc']}% | {best['kind']} | {best['backbone']} | {best['mode']}"
-        )
-        lines.append("")
-        lines.append("TOP 20:")
-        for i, (acc, r) in enumerate(rows[:20], 1):
-            lines.append(
-                f"{i:02d}. {r['run_tag']}\t{acc:.2f}%\t{r['kind']}\t{r['backbone']}\t{r['mode']}"
-            )
-    summary_txt.parent.mkdir(parents=True, exist_ok=True)
-    summary_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def build_plan_builtin(help_text: str, include_convnext: bool) -> List[Dict[str, str]]:
-    choices = parse_backbone_choices(help_text)
-    if not choices:
-        return []
-    plan = []
-    for bb in choices:
-        if (not include_convnext) and ("convnext" in bb.lower()):
-            continue
-        plan.append({"kind": "builtin", "backbone": bb})
-    return plan
-
-
-def build_plan_timm_20() -> List[Dict[str, str]]:
-    # 20 convnets/regnets/etc (variable input size friendly)
-    base = [
-        "regnety_016.ra3_in1k",
-        "regnety_032.ra3_in1k",
-        "regnety_064.ra3_in1k",
-        "regnety_080.ra3_in1k",
-        "regnetx_032.ra3_in1k",
-        "regnetx_064.ra3_in1k",
-        "resnet50.a1_in1k",
-        "resnet101.a1h_in1k",
-        "resnet152.a1_in1k",
-        "resnext50_32x4d.a1h_in1k",
-        "resnext101_32x8d.a1h_in1k",
-        "wide_resnet50_2.racm_in1k",
-        "efficientnetv2_rw_s.ra2_in1k",
-        "efficientnetv2_rw_m.agc_in1k",
-        "tf_efficientnet_b3.ns_jft_in1k",
-        "tf_efficientnet_b4.ns_jft_in1k",
-        "tf_efficientnetv2_s.in1k",
-        "tf_efficientnetv2_m.in1k",
-        "mobilenetv3_large_100.ra3_in1k",
-        "mobilenetv3_small_100.lamb_in1k",
-    ]
-
-    # nếu có timm, lọc các model có pretrained để đỡ phí quota
+def _get_help(train_py: Path) -> str:
     try:
-        import timm  # type: ignore
+        out = subprocess.check_output([sys.executable, str(train_py), "-h"], text=True, stderr=subprocess.STDOUT)
+        return out
+    except subprocess.CalledProcessError as e:
+        return e.output or ""
 
-        avail = set(timm.list_models(pretrained=True))
-        keep = [m for m in base if m in avail]
+def _has_flag(help_txt: str, flag: str) -> bool:
+    return flag in help_txt
 
-        if len(keep) < 20:
-            pool = []
-            for pat in [
-                "regnet*",
-                "resnet*",
-                "resnext*",
-                "wide_resnet*",
-                "*efficientnetv2*",
-                "tf_efficientnet*",
-                "mobilenetv3*",
-            ]:
-                pool.extend(timm.list_models(pat, pretrained=True))
 
-            seen = set(keep)
-            extra = []
-            for m in pool:
-                ml = m.lower()
-                if any(k in ml for k in [
-                    "vit", "swin", "deit", "beit", "cait", "pvt", "eva", "convnext", "maxvit", "coat"
-                ]):
-                    continue
-                if m not in seen:
-                    extra.append(m)
-                    seen.add(m)
+def _canonical_backbone(requested: str, backbone_choices: List[str]) -> str:
+    """
+    Tránh các alias mơ hồ gây crash trong code model (vd: 'resnet' -> dùng 'resnet50' nếu có).
+    """
+    choices = set(backbone_choices)
+    if requested == "resnet" and "resnet50" in choices:
+        return "resnet50"
+    if requested == "convnext" and "convnext_base" in choices:
+        # nếu có variant rõ ràng thì ưu tiên base
+        return "convnext_base"
+    return requested
 
-            keep.extend(extra[: max(0, 20 - len(keep))])
-        base = keep[:20]
-    except Exception:
-        base = base[:20]
 
-    return [{"kind": "timm", "timm_model": m, "timm_out_index": "3"} for m in base]
+def _parse_backbone_choices(help_txt: str) -> List[str]:
+    m = re.search(r"--backbone\s+\{([^}]+)\}", help_txt)
+    if not m:
+        return []
+    return [x.strip() for x in m.group(1).split(",") if x.strip()]
 
+def _infer_run_dir(output_root: Path, tag: str) -> Path:
+    # train.py: RUN_DIR = <output_root>/restran_<tag>
+    return output_root / f"restran_{tag}"
+
+def _looks_complete(run_dir: Path) -> bool:
+    for rel in DONE_MARKERS:
+        if (run_dir / rel).exists():
+            return True
+    return False
+
+def _archive_incomplete(run_dir: Path) -> None:
+    if not run_dir.exists():
+        return
+    dst = run_dir.parent / f"{run_dir.name}__incomplete__{_now()}"
+    shutil.move(str(run_dir), str(dst))
+
+def _load_results(path_jsonl: Path) -> Dict[str, dict]:
+    rows: Dict[str, dict] = {}
+    if not path_jsonl.exists():
+        return rows
+    for line in path_jsonl.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            tag = obj.get("tag")
+            if tag:
+                rows[tag] = obj
+        except Exception:
+            continue
+    return rows
+
+def _rewrite_results(path_jsonl: Path, rows: Dict[str, dict]) -> None:
+    path_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(rows[k], ensure_ascii=False) for k in sorted(rows.keys())]
+    path_jsonl.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+    # leaderboard txt
+    txt_path = path_jsonl.with_suffix(".txt")
+    items = []
+    for k, obj in rows.items():
+        acc = obj.get("best_val_acc")
+        items.append((acc if isinstance(acc, (int, float)) else -1.0, k, obj))
+    items.sort(key=lambda x: x[0], reverse=True)
+
+    out = []
+    out.append("tag\tbackbone\tpretrained\tbest_val_acc\tstatus\trun_dir\tlog")
+    for acc, _, obj in items:
+        out.append(
+            f"{obj.get('tag')}\t{obj.get('backbone')}\t{obj.get('pretrained')}\t{obj.get('best_val_acc')}\t"
+            f"{obj.get('status')}\t{obj.get('run_dir')}\t{obj.get('log_path')}"
+        )
+    if items:
+        best = items[0][2]
+        out.append("")
+        out.append(f"BEST\t{best.get('tag')}\tacc={best.get('best_val_acc')}")
+    txt_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+def _build_exp_list(backbone_choices: List[str], run_pretrained: bool) -> List[Exp]:
+    """
+    10 backbone x 2 modes = 20 runs.
+    Không dùng 'resnet' chung chung vì đã gặp lỗi Unsupported ResNet arch: resnet.
+    """
+    prefer = [
+        # convnext family (custom code)
+        "convnext_base", "convnext_small", "convnext_mid", "convnext_tiny",
+        # resnet family
+        "resnet101", "resnet50", "resnet34",
+        "resnext101", "resnext50",
+        "wide_resnet50",
+    ]
+
+    available = set(backbone_choices) if backbone_choices else set(prefer)
+    chosen: List[str] = []
+    for b in prefer:
+        if b in available:
+            chosen.append(b)
+
+    # fallback: pick any other backbone choices (except 'resnet') to fill to 10
+    for b in sorted(available):
+        if b == "resnet":
+            continue
+        if b not in chosen:
+            chosen.append(b)
+        if len(chosen) >= 10:
+            break
+    chosen = chosen[:10]
+
+    exps: List[Exp] = []
+    for b in chosen:
+        exps.append(Exp(backbone=b, pretrained=False, tag=f"ABL_{b}_scratch"))
+        if run_pretrained:
+            exps.append(Exp(backbone=b, pretrained=True, tag=f"ABL_{b}_pre"))
+    return exps
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser("Wide backbone ablation runner")
-    p.add_argument("--output-root", type=str, default="results/ablation_wide")
-    p.add_argument("--data-root", type=str, default=None)
-    p.add_argument("--epochs", type=int, default=None)
-    p.add_argument("--batch-size", type=int, default=None)
-    p.add_argument("--lr", type=float, default=None)
-
+    p = argparse.ArgumentParser()
+    p.add_argument("--train-py", type=str, default="train.py")
+    p.add_argument("--output-root", type=str, default="results/ablation_backbones")
+    p.add_argument("--results-file", type=str, default="", help="default: <output_root>/ablation_results.jsonl")
     p.add_argument("--max-runs", type=int, default=0)
-    p.add_argument("--only", type=str, default=None)
-    p.add_argument("--include-convnext", action="store_true")
-
-    g = p.add_mutually_exclusive_group()
-    g.add_argument("--scratch-only", action="store_true")
-    g.add_argument("--pretrained-only", action="store_true")
-
-    p.add_argument("--use-timm", action="store_true")
-    p.add_argument("--rerun", action="store_true")
+    p.add_argument("--only", type=str, default="")
+    p.add_argument("--skip-pretrained", action="store_true")
+    p.add_argument("--batch-size", type=int, default=0)
+    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--save-every-steps", type=int, default=200)
+    p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
-
 
 def main() -> None:
     args = parse_args()
-    root = Path(__file__).resolve().parent
-    train_py = root / "train.py"
+    train_py = Path(args.train_py).resolve()
     if not train_py.exists():
-        raise FileNotFoundError(f"train.py not found next to run_ablation.py: {train_py}")
+        raise FileNotFoundError(f"train.py not found: {train_py}")
 
-    help_text = parse_train_help(train_py)
-    supports_output_dir = has_flag(help_text, "--output-dir")
-    supports_overwrite = has_flag(help_text, "--overwrite")
-    supports_pretrained = has_flag(help_text, "--backbone-pretrained")
-    supports_timm = has_flag(help_text, "--timm-model") or has_flag(help_text, "--timm-out-index")
-    supports_input_norm = has_flag(help_text, "--input-norm")
+    output_root = Path(args.output_root).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
 
-    out_root = Path(args.output_root).resolve()
-    out_root.mkdir(parents=True, exist_ok=True)
+    help_txt = _get_help(train_py)
+    backbone_choices = _parse_backbone_choices(help_txt)
 
-    results_tsv = out_root / "ablation_results.tsv"
-    summary_txt = out_root / "ablation_summary.txt"
-    existing = load_existing(results_tsv)
+    has_pretrained_flag = _has_flag(help_txt, "--backbone-pretrained")
+    run_pretrained = (has_pretrained_flag and (not args.skip_pretrained))
 
-    plan: List[Dict[str, str]] = []
-    plan.extend(build_plan_builtin(help_text, include_convnext=args.include_convnext))
-
-    if args.use_timm:
-        if not supports_timm:
-            print("[WARN] train.py không có timm args trong -h, bỏ qua timm plan.")
-        else:
-            plan.extend(build_plan_timm_20())
-
-    if not plan:
-        raise RuntimeError("Không tìm được backbone choices trong train.py -h và/hoặc timm plan không bật.")
-
-    tokens = [t.strip().lower() for t in (args.only.split(",") if args.only else []) if t.strip()]
-    if tokens:
-        def keep(item: Dict[str, str]) -> bool:
-            name = (item.get("backbone") or item.get("timm_model") or "").lower()
-            return any(tok in name for tok in tokens)
-        plan = [x for x in plan if keep(x)]
-
-    if args.scratch_only:
-        modes = ["scratch"]
-    elif args.pretrained_only:
-        modes = ["pretrained"]
-    else:
-        modes = ["scratch", "pretrained"]
-
-    jobs: List[Tuple[str, Dict[str, str]]] = []
-    for item in plan:
-        for mode in modes:
-            if mode == "pretrained" and (not supports_pretrained):
-                continue
-            if item["kind"] == "builtin":
-                tag = safe_tag(f"ABL_{item['backbone']}__{mode}")
-            else:
-                tag = safe_tag(f"ABL_TIMM_{item['timm_model']}__{mode}")
-            jobs.append((tag, {**item, "mode": mode}))
+    exps = _build_exp_list(backbone_choices, run_pretrained=run_pretrained)
+    if args.only:
+        key = args.only.lower().strip()
+        exps = [e for e in exps if key in e.backbone.lower()]
 
     if args.max_runs and args.max_runs > 0:
-        jobs = jobs[: args.max_runs]
+        exps = exps[: args.max_runs]
 
-    print("=== ABLATION ===")
-    print(f"output_root: {out_root}")
-    print(f"jobs       : {len(jobs)}")
-    print(f"supports_pretrained: {supports_pretrained}")
-    print(f"supports_timm      : {supports_timm}")
-    print("=============")
+    results_jsonl = Path(args.results_file).resolve() if args.results_file else (output_root / "ablation_results.jsonl")
+    rows = _load_results(results_jsonl)
 
-    for i, (tag, spec) in enumerate(jobs, 1):
-        if (not args.rerun) and (tag in existing and existing[tag].get("status") == "DONE"):
-            print(f"[SKIP DONE] {tag} ({existing[tag].get('best_val_acc')}%)")
+    for exp in exps:
+        run_dir = _infer_run_dir(output_root, exp.tag)
+        log_path = output_root / "_ablation_logs" / f"{exp.tag}.log"
+
+        prev = rows.get(exp.tag)
+        if prev and prev.get("status") == "ok":
+            print(f"[SKIP] {exp.tag} done: acc={prev.get('best_val_acc')}")
             continue
 
-        log_path = out_root / "_logs" / f"{tag}.log"
+        if run_dir.exists():
+            if _looks_complete(run_dir):
+                # đánh dấu ok (dù best acc chưa biết)
+                rows[exp.tag] = {
+                    "tag": exp.tag,
+                    "backbone": exp.backbone,
+                    "pretrained": exp.pretrained,
+                    "status": "ok",
+                    "best_val_acc": prev.get("best_val_acc") if prev else None,
+                    "run_dir": str(run_dir),
+                    "log_path": str(log_path) if prev else None,
+                    "timestamp": _now(),
+                    "note": "existing markers found; skipped",
+                }
+                _rewrite_results(results_jsonl, rows)
+                print(f"[SKIP] {exp.tag} run_dir has markers: {run_dir}")
+                continue
+            else:
+                print(f"[ARCHIVE] incomplete -> {run_dir}")
+                _archive_incomplete(run_dir)
 
-        # archive incomplete folders that contain tag (so next run starts clean)
-        for p in out_root.glob(f"*{tag}*"):
-            if p.is_dir() and not (p / "DONE_ABLATION").exists():
-                try:
-                    p.rename(p.with_name(p.name + f"__INCOMPLETE__{now_stamp()}"))
-                except Exception:
-                    pass
+        bb = _canonical_backbone(exp.backbone, backbone_choices)
+        cmd = [sys.executable, str(train_py), "-m", "restran", "--backbone", bb, "--run-tag", exp.tag, "--output-dir", str(output_root)]
+        if exp.pretrained and has_pretrained_flag:
+            cmd.append("--backbone-pretrained")
 
-        cmd = [sys.executable, str(train_py), "-m", "restran"]
-
-        if spec["kind"] == "builtin":
-            cmd += ["--backbone", spec["backbone"]]
-        else:
-            cmd += [
-                "--backbone", "timm",
-                "--timm-model", spec["timm_model"],
-                "--timm-out-index", spec.get("timm_out_index", "3"),
-            ]
-
-        if spec["mode"] == "pretrained":
-            cmd += ["--backbone-pretrained"]
-            if supports_input_norm:
-                cmd += ["--input-norm", "imagenet"]
-
-        # only override when provided
-        if args.data_root:
-            cmd += ["--data-root", args.data_root]
-        if args.epochs is not None:
-            cmd += ["--epochs", str(args.epochs)]
-        if args.batch_size is not None:
+        # override nhẹ (không đụng config model)
+        if args.batch_size and _has_flag(help_txt, "--batch-size"):
             cmd += ["--batch-size", str(args.batch_size)]
-        if args.lr is not None:
-            cmd += ["--lr", str(args.lr)]
+        if args.num_workers and _has_flag(help_txt, "--num-workers"):
+            cmd += ["--num-workers", str(args.num_workers)]
+        if args.save_every_steps and args.save_every_steps > 0 and _has_flag(help_txt, "--save-every-steps"):
+            cmd += ["--save-every-steps", str(args.save_every_steps)]
 
-        if supports_output_dir:
-            cmd += ["--output-dir", str(out_root)]
-        cmd += ["--run-tag", tag]
-        if supports_overwrite:
-            cmd += ["--overwrite"]
+        print("\n" + "=" * 90)
+        print(f"[RUN] {exp.tag} | backbone={exp.backbone} | pretrained={exp.pretrained}")
+        print("cmd:", " ".join(cmd))
+        print("run_dir:", run_dir)
+        print("log:", log_path)
+        print("=" * 90)
 
-        name = spec.get("backbone") or spec.get("timm_model") or ""
-        print(f"\n[{i}/{len(jobs)}] RUN {tag} | {spec['kind']} | {name} | {spec['mode']}")
-        rc = run_cmd(cmd, cwd=root, log_path=log_path)
-        best = extract_best_val_acc(log_path)
-
-        status = "DONE" if (rc == 0 and best is not None) else "FAIL"
-        write_results_tsv(
-            results_tsv,
-            {
-                "time": now_stamp(),
-                "run_tag": tag,
-                "kind": spec["kind"],
-                "backbone": spec.get("backbone", spec.get("timm_model", "")),
-                "mode": spec["mode"],
-                "status": status,
-                "best_val_acc": f"{best:.4f}" if best is not None else "",
-                "run_dir": str(out_root),
+        if args.dry_run:
+            rows[exp.tag] = {
+                "tag": exp.tag,
+                "backbone": exp.backbone,
+                "pretrained": exp.pretrained,
+                "status": "dry_run",
+                "best_val_acc": None,
+                "run_dir": str(run_dir),
                 "log_path": str(log_path),
-            },
-        )
-        rewrite_summary(results_tsv, summary_txt)
+                "timestamp": _now(),
+            }
+            _rewrite_results(results_jsonl, rows)
+            continue
 
-        # best-effort mark DONE in latest matching run folder
-        if status == "DONE":
-            cand = [p for p in out_root.glob(f"*{tag}*") if p.is_dir()]
-            if cand:
-                cand.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                try:
-                    (cand[0] / "DONE_ABLATION").write_text("done\n", encoding="utf-8")
-                except Exception:
-                    pass
+        rc, log_text = _run(cmd, log_path)
+        best_acc = _parse_best_acc(log_text)
+        status = "ok" if (rc == 0 and best_acc is not None) else "fail"
 
-        print(f"[{status}] best_val_acc={best}")
+        rows[exp.tag] = {
+            "tag": exp.tag,
+            "backbone": exp.backbone,
+            "pretrained": exp.pretrained,
+            "status": status,
+            "best_val_acc": best_acc,
+            "run_dir": str(run_dir),
+            "log_path": str(log_path),
+            "return_code": rc,
+            "timestamp": _now(),
+        }
+        _rewrite_results(results_jsonl, rows)
 
-    print("\n=== FINISH ===")
-    print(f"results: {results_tsv}")
-    print(f"summary : {summary_txt}")
+        if status != "ok":
+            print(f"[FAIL] {exp.tag} rc={rc} best_acc={best_acc} (xem log: {log_path})")
 
+    # in best cuối cùng
+    rows2 = _load_results(results_jsonl)
+    best_tag, best_acc = None, -1.0
+    for tag, obj in rows2.items():
+        if obj.get("status") != "ok":
+            continue
+        acc = obj.get("best_val_acc")
+        if isinstance(acc, (int, float)) and acc > best_acc:
+            best_acc = acc
+            best_tag = tag
+    print("\n=== DONE ===")
+    if best_tag:
+        print(f"BEST: {best_tag} | acc={best_acc}")
+    else:
+        print("Chưa có run OK nào (xem _ablation_logs/).")
 
 if __name__ == "__main__":
     main()
