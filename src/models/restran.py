@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.models.components import (
+    TimmFeatureExtractor,   # <-- add
+
     ResNetFeatureExtractor,
     ConvNeXtFeatureExtractor,
     AttentionFusion,
@@ -63,7 +65,25 @@ class ResTranOCR(nn.Module):
 
         # 2) Backbone
         backbone_type = (backbone_type or "convnext").lower()
-        if backbone_type in ["convnext", "convnext_tiny"]:
+
+        # NEW: timm backbones, format:
+        #   timm:<model_name>            (default out_index=0)
+        #   timm:<model_name>:<out_idx>  (explicit stage)
+        if backbone_type.startswith("timm:"):
+            spec = backbone_type[len("timm:"):]  # e.g. "swinv2_base_window12_192.ms_in22k:0"
+            out_index = 0
+            model_name = spec
+            # parse optional ":<digit>" at the end
+            parts = spec.rsplit(":", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                model_name = parts[0]
+                out_index = int(parts[1])
+
+            # For timm, we WANT pretrained by default
+            self.backbone = TimmFeatureExtractor(model_name=model_name, pretrained=True, in_chans=3, out_index=out_index)
+            self.backbone_out_channels = int(self.backbone.out_channels)
+
+        elif backbone_type in ["convnext", "convnext_tiny"]:
             depths = [3, 3, 9, 3]
             dims = [96, 192, 384, 768]
             self.backbone = ConvNeXtFeatureExtractor(depths=depths, dims=dims, drop_path_rate=float(drop_path_rate))

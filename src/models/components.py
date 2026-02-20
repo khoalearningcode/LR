@@ -3,6 +3,55 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+# --- ADD THIS: TIMM Feature Extractor ---
+class TimmFeatureExtractor(nn.Module):
+    """
+    TIMM backbone wrapper for OCR:
+    - uses features_only=True to get intermediate feature maps (N,C,H,W)
+    - picks an early stage (out_index=0 by default) to keep width resolution
+    - pools height -> 1 to match OCR pipeline (N,C,1,W)
+    """
+    def __init__(self, model_name: str, pretrained: bool = True, in_chans: int = 3, out_index: int = 0):
+        super().__init__()
+        try:
+            import timm
+        except Exception as e:
+            raise ImportError("timm is required for TIMM backbones. Please `pip install timm`." ) from e
+
+        self.model_name = model_name
+        self.out_index = int(out_index)
+
+        # Robust: if pretrained download fails, fallback to pretrained=False
+        try:
+            self.m = timm.create_model(
+                model_name,
+                pretrained=bool(pretrained),
+                features_only=True,
+                out_indices=(self.out_index,),
+                in_chans=in_chans,
+            )
+        except Exception as e:
+            print(f"[WARN] timm pretrained load failed for {model_name}: {e}")
+            print("[WARN] Fallback to pretrained=False (random init).")
+            self.m = timm.create_model(
+                model_name,
+                pretrained=False,
+                features_only=True,
+                out_indices=(self.out_index,),
+                in_chans=in_chans,
+            )
+
+        # channels of the selected feature stage
+        self.out_channels = int(self.m.feature_info.channels()[0])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # returns list with 1 feature map
+        feat = self.m(x)[0]  # [B, C, H, W]
+        # MUST collapse height -> 1 for your pipeline (fusion + transformer expect H=1)
+        feat = F.adaptive_avg_pool2d(feat, (1, None))  # [B, C, 1, W]
+        return feat
+
+
 class DropPath(nn.Module):
     """Stochastic Depth / DropPath (per-sample).
 
