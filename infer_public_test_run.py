@@ -10,10 +10,10 @@ Examples:
   python infer_public_test.py --run-dir results/restran_E6_w192_lrSim035_fd020 --data-root data/public_test
 
   # 2) Point to checkpoint => auto-detect run folder from checkpoint path (if possible)
-  python infer_public_test.py --checkpoint results/restran_E6_w192_lrSim035_fd020/restran_best.pth --data-root data/public_test
+  python infer_public_test_run.py --checkpoint /home/caokhoa/Documents/MultiFrame-LPR/results/restran_E6_w192_lrSim035_fd020/restran_best.pth --data-root /home/caokhoa/Documents/MultiFrame-LPR/data/TKzFBtn7-test-blind
 
   # 3) Manual override image size (if needed)
-  python infer_public_test.py --run-dir results/restran_E6_w192_lrSim035_fd020 --img-height 32 --img-width 192
+  python infer_public_test_run.py --run-dir /home/caokhoa/Documents/MultiFrame-LPR/results/restran_E6_w192_lrSim035_fd020/restran_best.pth --img-height 32 --img-width 192
 """
 import argparse
 import json
