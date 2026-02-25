@@ -33,6 +33,11 @@ logs/
 repomix-output.xml
 notebook.ipynb
 
-results/
+# Keep results directory in git, but ignore heavy binaries inside it
+results/**/*.pth
+results/**/*.pt
+results/**/*.ckpt
+results/**/*.bin
+results/**/*.onnx
 his.txt
 backup/
